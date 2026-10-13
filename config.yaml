@@ -1,0 +1,70 @@
+# PSN gift card tracker configuration
+# Secrets (Telegram token / chat id) go in .env, not here.
+
+interval_seconds: 180          # how often to check all stores (3 min)
+interval_jitter_seconds: 30    # random +/- so requests don't look robotic
+store_timeout_seconds: 120     # give up on a store after this long in one cycle
+error_alert_after_failures: 5  # Telegram warning if a store fails this many times in a row
+notify_out_of_stock: false     # true = also message when something sells out
+state_file: data/state.json
+
+# Which product titles count as "PlayStation gift card"
+title_filter:
+  include_any: [playstation, psn]
+  card_words_any: [gift card, giftcard, wallet, voucher, top up, topup, store card]
+  exclude_any: [playstation plus, ps plus, memory card, controller, console, xbox, steam]
+
+stores:
+  gyftr:
+    enabled: true
+    brand_slugs: [sony-playstation]          # https://www.gyftr.com/sony-playstation
+
+  gamestheshop:
+    enabled: true
+    search_queries: [playstation store gift card]
+    max_pages: 3
+
+  digistore:
+    enabled: true
+    categories: [playstation-card]           # https://digistore.co.in/product-category/console-games/playstation-card/
+    search_queries: [PSN]
+
+  flipkart:
+    enabled: true
+    discover_every_cycles: 10                # re-run search every N cycles to find new listings
+    concurrency: 3
+    search_queries:
+      - playstation rs gift card
+      - sony playstation store gift card
+      - playstation store gift card
+    # Listings found so far (search results vary, so these are always checked too)
+    product_urls:
+      - https://www.flipkart.com/playstation-rs-1000-inr-gift-card/p/itm3d59225ae5e13
+      - https://www.flipkart.com/playstation-rs-1000-inr-gift-card/p/itmd5aafce6a1678
+      - https://www.flipkart.com/playstation-rs-2000-inr-gift-card/p/itmd41e56cc4ca04
+      - https://www.flipkart.com/2-000-playstation-store-gift-card-india/p/itm083312a90e1aa
+      - https://www.flipkart.com/sony-interactive-entertainment-rs-3000-playstation-store-gift-card/p/itme51240e714e50
+      - https://www.flipkart.com/sony-interactive-entertainment-europe-rs-3000-playstation-store-gift-card-digital-voucher-delivery-email/p/itma3cec289dd512
+      - https://www.flipkart.com/playstation-rs-4000-store-gift-card/p/itm0ceacc74a0363
+      - https://www.flipkart.com/sony-interactive-entertainment-europe-playstation-store-gift-card-4000-inr/p/itm5cb36d77285f5
+      - https://www.flipkart.com/sony-interactive-entertainment-rs-5000-playstation-store-gift-card/p/itm5b2422845fb13
+      - https://www.flipkart.com/sony-interactive-entertainment-europe-playstation-store-gift-card-5000-inr/p/itmb079e5a22622c
+      - https://www.flipkart.com/sony-interactive-entertainment-europe-rs-5000-playstation-store-gift-card-digital-voucher-delivery-email/p/itmcf54504b6dee2
+      - https://www.flipkart.com/playstation-rs-7000-store-gift-card/p/itm3de7db3a72837
+      - https://www.flipkart.com/playstation-rs-8000-store-gift-card/p/itm0031eec1b6662
+      - https://www.flipkart.com/playstation-rs-9000-store-gift-card/p/itm9a5cc90ee3729
+      - https://www.flipkart.com/playstation-rs-12000-store-gift-card/p/itm111d6339f4c1f
+      - https://www.flipkart.com/playstation-rs-13500-store-gift-card/p/itmf5a68356acef9
+
+  amazon:
+    # Amazon blocks most cloud server IPs (HTTP 503). Leave enabled and watch the logs:
+    # if you get a "can't be checked" Telegram warning, set enabled: false.
+    enabled: true
+    discover_every_cycles: 10
+    search_queries: [playstation store gift card india]
+    asins: []                                # optional: add ASINs you know, e.g. [B0XXXXXXXX]
+
+  jiogames:
+    # JioGames Store doesn't sell PSN cards right now; this alerts you if they start.
+    enabled: true
+    search_queries: [playstation, psn]

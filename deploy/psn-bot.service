@@ -1,0 +1,21 @@
+[Unit]
+Description=PlayStation gift card stock tracker (Telegram alerts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=psnbot
+WorkingDirectory=/opt/psn-stock-bot
+ExecStart=/opt/psn-stock-bot/.venv/bin/python -m psnbot -c /opt/psn-stock-bot/config.yaml
+Restart=always
+RestartSec=30
+# Basic hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/psn-stock-bot/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

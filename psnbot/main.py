@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from .http import make_client
 from .models import Item, StoreError, TitleFilter
 from .state import State
+from .controls import Controls
 from .stores import REGISTRY
 from .telegram import Telegram
 
@@ -88,51 +89,83 @@ class Bot:
             self.stores.append(store)
         if not self.stores:
             raise SystemExit("No stores enabled in config")
+        self.controls = Controls(self)
+
+    def is_muted(self, store_id: str) -> bool:
+        return store_id in self.state.settings.get("muted", [])
 
     # ------------------------------------------------------------------
     async def run_cycle(self, client) -> None:
         first_run = self.state.is_new
         results = await asyncio.gather(*(self._check_store(client, s) for s in self.stores))
-
         restocked: dict[str, list[Item]] = {}
         sold_out: dict[str, list[Item]] = {}
-        now = time.time()
         for store, items in zip(self.stores, results):
             if items is None:          # store failed this cycle -> keep previous state untouched
                 continue
-            seen_keys = set()
-            for it in items:
-                seen_keys.add(it.key)
-                prev = self.state.items.get(it.key)
-                prev_stock = prev.get("in_stock") if prev else None
-                if it.in_stock is None:      # undetermined -> don't flip state
-                    if prev:
-                        prev["last_seen"] = now
-                    continue
-                if it.in_stock and prev_stock is not True and not first_run:
-                    restocked.setdefault(store.name, []).append(it)
-                if not it.in_stock and prev_stock is True and not first_run:
-                    sold_out.setdefault(store.name, []).append(it)
-                self.state.items[it.key] = {
-                    "store": it.store, "title": it.title, "url": it.url, "in_stock": it.in_stock,
-                    "price": it.price, "mrp": it.mrp, "last_seen": now,
-                    "last_change": now if (prev_stock != it.in_stock) else (prev or {}).get("last_change", now),
-                }
+            self._apply(store, items, restocked, sold_out, full_listing=True, silent=first_run)
+        if first_run:
+            self.state.seeded = True
+            await self._send_startup_summary(client)
+        await self._notify(client, restocked, sold_out)
+        self.state.save()
+
+    async def run_fast_cycle(self, client) -> None:
+        """Re-check only the priority listings (e.g. Amazon `fast_check`)."""
+        if self.state.is_new:
+            return   # let the first full cycle seed the state and send the summary
+        restocked: dict[str, list[Item]] = {}
+        sold_out: dict[str, list[Item]] = {}
+        for store in self.stores:
+            try:
+                items = await asyncio.wait_for(store.fetch_fast(client), timeout=self.store_timeout)
+            except Exception as e:  # noqa: BLE001 - errors are counted by the full cycle
+                log.debug("%s: fast check failed: %s", store.name, e)
+                continue
+            full = getattr(store, "fast_is_full_listing", False)
+            if items or (full and items is not None):
+                self._apply(store, items, restocked, sold_out, full_listing=full, silent=False)
+        await self._notify(client, restocked, sold_out)
+        if restocked or sold_out:
+            self.state.save()
+
+    def _apply(self, store, items: list[Item], restocked, sold_out, *, full_listing: bool, silent: bool) -> None:
+        """Compare fresh results with saved state and collect what changed."""
+        now = time.time()
+        seen_keys = set()
+        # Muted stores (Telegram /menu) still update their state, they just don't notify.
+        silent = silent or self.is_muted(store.id)
+        for it in items:
+            seen_keys.add(it.key)
+            prev = self.state.items.get(it.key)
+            prev_stock = prev.get("in_stock") if prev else None
+            if it.in_stock is None:      # undetermined -> don't flip state
+                if prev:
+                    prev["last_seen"] = now
+                continue
+            if it.in_stock and prev_stock is not True and not silent:
+                restocked.setdefault(store.name, []).append(it)
+            if not it.in_stock and prev_stock is True and not silent:
+                sold_out.setdefault(store.name, []).append(it)
+            self.state.items[it.key] = {
+                "store": it.store, "title": it.title, "url": it.url, "in_stock": it.in_stock,
+                "price": it.price, "mrp": it.mrp, "last_seen": now,
+                "last_change": now if (prev_stock != it.in_stock) else (prev or {}).get("last_change", now),
+            }
+        if full_listing:
             # Items that disappeared from a store's listing are treated as out of stock
             for key, rec in self.state.items.items():
                 if rec.get("store") == store.id and key not in seen_keys and rec.get("in_stock"):
                     rec["in_stock"] = False
                     rec["last_change"] = now
-            if hasattr(store, "known"):
-                self.state.known[store.id] = dict(store.known)
+        if hasattr(store, "known"):
+            self.state.known[store.id] = dict(store.known)
 
-        if first_run:
-            await self._send_startup_summary(client)
+    async def _notify(self, client, restocked, sold_out) -> None:
         if restocked:
             await self._send_restock(client, restocked)
         if sold_out and self.notify_oos:
             await self._send_sold_out(client, sold_out)
-        self.state.save()
 
     async def _check_store(self, client, store) -> list[Item] | None:
         err = self.state.store_errors.setdefault(store.id, {"count": 0, "alerted": False})
@@ -146,10 +179,12 @@ class Bot:
             log.warning("%s: check failed (%d in a row): %s", store.name, err["count"], msg)
             if err["count"] >= self.error_alert_after and not err["alerted"]:
                 err["alerted"] = True
-                await self.tg.send(client, f"⚠️ <b>{store.name}</b> can't be checked "
-                                           f"({err['count']} failures in a row).\n<code>{html.escape(msg[:300])}</code>")
+                if not self.is_muted(store.id):
+                    await self.tg.send(client, f"⚠️ <b>{store.name}</b> can't be checked "
+                                               f"({err['count']} failures in a row).\n"
+                                               f"<code>{html.escape(msg[:300])}</code>")
             return None
-        if err["alerted"]:
+        if err["alerted"] and not self.is_muted(store.id):
             await self.tg.send(client, f"✅ <b>{store.name}</b> is being checked again.")
         err.update(count=0, alerted=False, last_error=None)
         in_stock = sum(1 for i in items if i.in_stock)
@@ -170,12 +205,16 @@ class Bot:
             await self.tg.send(client, f"🔴 Sold out on <b>{store_name}</b>:\n{names}")
 
     async def _send_startup_summary(self, client) -> None:
+        active = [s for s in self.stores if not self.is_muted(s.id)]
+        if not active:
+            return   # everything muted via /menu
         by_store: dict[str, list[dict]] = {}
         for rec in self.state.items.values():
-            if rec.get("in_stock"):
+            if rec.get("in_stock") and not self.is_muted(rec["store"]):
                 by_store.setdefault(rec["store"], []).append(rec)
         lines = [f"🤖 <b>PSN gift card tracker started</b>\n<i>{_now()}</i>",
-                 f"Watching: {', '.join(s.name for s in self.stores)}", ""]
+                 f"Watching: {', '.join(s.name for s in active)}",
+                 "Send /menu to turn store notifications on or off.", ""]
         if not by_store:
             lines.append("Nothing is in stock right now. I'll message you the moment something comes back.")
         else:
@@ -200,18 +239,33 @@ class Bot:
                 loop.add_signal_handler(sig, stop.set)
             except NotImplementedError:
                 pass
-        async with make_client() as client:
+        fast_interval = int(self.cfg.get("fast_interval_seconds", 60))
+
+        async def loop(fn, every: int, spread: int, name: str):
             while not stop.is_set():
                 t0 = time.monotonic()
                 try:
-                    await self.run_cycle(client)
+                    await fn(client)
                 except Exception:  # noqa: BLE001
-                    log.exception("Cycle crashed; will retry next interval")
-                sleep_for = max(10, interval + random.randint(-jitter, jitter) - (time.monotonic() - t0))
+                    log.exception("%s crashed; will retry next interval", name)
+                sleep_for = max(10, every + random.randint(-spread, spread) - (time.monotonic() - t0))
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=sleep_for)
                 except asyncio.TimeoutError:
                     pass
+
+        async with make_client() as client:
+            tasks = [loop(self.run_cycle, interval, jitter, "Full check")]
+            if fast_interval > 0:
+                tasks.append(loop(self.run_fast_cycle, fast_interval, max(1, fast_interval // 6), "Fast check"))
+            if not self.tg.dry_run and self.cfg.get("telegram_menu", True):
+                tasks.append(self.controls.run(client, stop))   # /menu, /status, /help
+            running = [asyncio.create_task(t) for t in tasks]
+            await stop.wait()
+            for t in running:          # e.g. Telegram long-poll waits up to 50 s otherwise
+                t.cancel()
+            await asyncio.gather(*running, return_exceptions=True)
+            self.state.save()
         log.info("Stopped.")
 
 
@@ -227,6 +281,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="print alerts instead of sending to Telegram")
     ap.add_argument("--test-telegram", action="store_true", help="send a test message and exit")
     ap.add_argument("--list", action="store_true", help="print every listing found right now and exit")
+    ap.add_argument("--test-blinkit", action="store_true",
+                    help="check Blinkit once, print what it sees and save the raw response to data/")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -239,6 +295,9 @@ def main() -> None:
 
     if args.list:
         asyncio.run(_list(cfg))
+        return
+    if args.test_blinkit:
+        asyncio.run(_test_blinkit(cfg))
         return
     bot = Bot(cfg, dry_run=args.dry_run)
     if args.test_telegram:
@@ -254,6 +313,36 @@ def main() -> None:
         asyncio.run(_o())
     else:
         asyncio.run(bot.run_forever())
+
+
+async def _test_blinkit(cfg: dict) -> None:
+    from .stores.blinkit import Blinkit, read_stock
+    scfg = dict((cfg.get("stores") or {}).get("blinkit") or {}, save_raw=True)
+    b = Blinkit(scfg, TitleFilter(cfg.get("title_filter", {})))
+    print(f"Location: pincode {scfg.get('pincode')}  lat={scfg.get('lat')} lon={scfg.get('lon')}")
+    from curl_cffi.requests import AsyncSession
+    async with AsyncSession(impersonate="chrome") as s:
+        for prid in b._prids():
+            r = await s.post(f"https://blinkit.com/v1/layout/product/{prid}", headers=b._headers(prid), timeout=30)
+            print(f"\nProduct {prid}: HTTP {r.status_code}, {len(r.text)} bytes")
+            if r.status_code == 403 or "you have been blocked" in r.text.lower():
+                print("  ❌ BLOCKED by Cloudflare — this machine's IP can't reach Blinkit.")
+                continue
+            try:
+                data = r.json()
+            except ValueError:
+                print("  ❌ Not JSON. First 300 chars:", r.text[:300])
+                continue
+            b._save_raw(prid, data)
+            try:
+                stock, info = read_stock(data, prid)
+            except StoreError as e:
+                print("  ❌", e)
+                continue
+            print(f"  name={info['name']!r} price={info['price']} mrp={info['mrp']}")
+            print(f"  signals: {info['signals'] or 'none'}")
+            print("  RESULT:", {True: "✅ IN STOCK", False: "🔴 OUT OF STOCK", None: "❓ UNKNOWN"}[stock])
+            print(f"  Raw response saved to data/blinkit_{prid}.json — send it to me if anything looks wrong.")
 
 
 async def _list(cfg: dict) -> None:

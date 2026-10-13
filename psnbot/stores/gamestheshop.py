@@ -35,12 +35,20 @@ class GamesTheShop(Store):
                     inv = p.get("inventory") or {}
                     status = (p.get("stock_status") or "").strip().lower()
                     avail = inv.get("available_stock")
-                    if "out" in status:
+                    # Seen values: "In Stock" (stock > 0) and "Out of Stock" (stock 0).
+                    # Require both signals to agree before calling it in stock.
+                    if "out" in status or (avail is not None and avail <= 0):
                         in_stock = False
-                    elif status.replace(" ", "") == "instock" or (avail is not None and avail > 0):
+                    elif status.replace(" ", "") == "instock":
                         in_stock = True
                     else:
                         in_stock = None
+                    limit = inv.get("buy_limit_count")
+                    notes = []
+                    if in_stock and avail and avail < 10:
+                        notes.append(f"only {avail} left")
+                    if in_stock and limit:
+                        notes.append(f"max {limit} per order")
                     vid = p.get("id")
                     seen[vid] = Item(
                         store=self.id,
@@ -50,7 +58,7 @@ class GamesTheShop(Store):
                         in_stock=in_stock,
                         price=p.get("sale_price"),
                         mrp=p.get("regular_price"),
-                        note=f"only {avail} left" if in_stock and avail and avail < 10 else "",
+                        note=", ".join(notes),
                     )
                 if page >= int(meta.get("totalPages") or 1):
                     break

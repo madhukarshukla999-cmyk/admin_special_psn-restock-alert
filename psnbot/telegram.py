@@ -15,35 +15,59 @@ class Telegram:
         self.chat_ids = chat_ids
         self.dry_run = dry_run
 
-    async def send(self, client: httpx.AsyncClient, html: str) -> bool:
-        ok = True
-        for chunk in _split(html):
-            for chat_id in self.chat_ids:
-                ok &= await self._send_one(client, chat_id, chunk)
-        return ok
-
-    async def _send_one(self, client, chat_id: str, text: str) -> bool:
+    # -- low level -------------------------------------------------------
+    async def api(self, client: httpx.AsyncClient, method: str, payload: dict,
+                  timeout: float = 20) -> dict | None:
+        """Call a Bot API method. Returns `result` or None on failure."""
         if self.dry_run:
-            log.info("[dry-run] Telegram -> %s:\n%s", chat_id, text)
-            return True
-        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
-                   "disable_web_page_preview": True}
+            log.info("[dry-run] Telegram %s %s", method, {k: v for k, v in payload.items() if k != "text"})
+            return None
+        url = f"https://api.telegram.org/bot{self.token}/{method}"
         for attempt in range(4):
             try:
-                r = await client.post(url, json=payload, timeout=20)
+                r = await client.post(url, json=payload, timeout=timeout)
+                data = r.json()
                 if r.status_code == 429:
-                    wait = (r.json().get("parameters") or {}).get("retry_after", 5)
-                    await asyncio.sleep(float(wait) + 1)
+                    await asyncio.sleep(float((data.get("parameters") or {}).get("retry_after", 5)) + 1)
                     continue
-                if r.status_code != 200:
-                    log.error("Telegram error %s: %s", r.status_code, r.text[:300])
-                    return False
-                return True
-            except httpx.HTTPError as e:
-                log.warning("Telegram send failed (attempt %d): %r", attempt + 1, e)
+                if not data.get("ok"):
+                    # "message is not modified" is harmless (user tapped the same state twice)
+                    if "not modified" not in str(data.get("description", "")):
+                        log.error("Telegram %s error %s: %s", method, r.status_code, str(data)[:300])
+                    return None
+                return data.get("result")
+            except (httpx.HTTPError, ValueError) as e:
+                if method == "getUpdates":
+                    raise
+                log.warning("Telegram %s failed (attempt %d): %r", method, attempt + 1, e)
                 await asyncio.sleep(3 * (attempt + 1))
-        return False
+        return None
+
+    # -- messages --------------------------------------------------------
+    async def send(self, client: httpx.AsyncClient, html: str, chat_ids: list[str] | None = None,
+                   reply_markup: dict | None = None) -> bool:
+        ok = True
+        for chunk in _split(html):
+            for chat_id in chat_ids or self.chat_ids:
+                if self.dry_run:
+                    log.info("[dry-run] Telegram -> %s:\n%s", chat_id, chunk)
+                    continue
+                payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML",
+                           "disable_web_page_preview": True}
+                if reply_markup:
+                    payload["reply_markup"] = reply_markup
+                ok &= await self.api(client, "sendMessage", payload) is not None
+        return ok
+
+    async def edit(self, client, chat_id, message_id, html: str, reply_markup: dict | None = None) -> None:
+        payload = {"chat_id": chat_id, "message_id": message_id, "text": html,
+                   "parse_mode": "HTML", "disable_web_page_preview": True}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        await self.api(client, "editMessageText", payload)
+
+    async def answer_callback(self, client, callback_id: str, text: str = "") -> None:
+        await self.api(client, "answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
 
 
 def _split(text: str) -> list[str]:

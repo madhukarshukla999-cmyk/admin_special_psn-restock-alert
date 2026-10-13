@@ -3,10 +3,14 @@
 
 interval_seconds: 180          # how often to check all stores (3 min)
 interval_jitter_seconds: 30    # random +/- so requests don't look robotic
+fast_interval_seconds: 60      # extra checks for priority listings (amazon.fast_check); 0 = off
 store_timeout_seconds: 120     # give up on a store after this long in one cycle
 error_alert_after_failures: 5  # Telegram warning if a store fails this many times in a row
 notify_out_of_stock: false     # true = also message when something sells out
 state_file: data/state.json
+# Telegram /menu to switch store notifications on/off (saved in state_file).
+# Only one running copy per bot token can use it — set false on a second copy (e.g. a home Blinkit copy).
+telegram_menu: true
 
 # Which product titles count as "PlayStation gift card"
 title_filter:
@@ -21,7 +25,9 @@ stores:
 
   gamestheshop:
     enabled: true
-    search_queries: [playstation store gift card]
+    # "gift card" returns only ~17 products (all 8 PSN values among them) in a single page,
+    # so a card can't drop off the results just because of ranking changes.
+    search_queries: [gift card]
     max_pages: 3
 
   digistore:
@@ -30,41 +36,47 @@ stores:
     search_queries: [PSN]
 
   flipkart:
+    # Stock comes from the search results: every PSN card tile shows "Coming Soon" or
+    # "Currently unavailable" unless it can actually be bought. (Product pages are not
+    # reliable — they often show "Buy now" for cards that can't be purchased.)
     enabled: true
-    discover_every_cycles: 10                # re-run search every N cycles to find new listings
-    concurrency: 3
+    # Each of these returns all PSN gift card tiles. If two searches disagree about a
+    # card, "unavailable" wins, so a glitch in one search can't cause a false alert.
     search_queries:
       - playstation rs gift card
-      - sony playstation store gift card
-      - playstation store gift card
-    # Listings found so far (search results vary, so these are always checked too)
-    product_urls:
-      - https://www.flipkart.com/playstation-rs-1000-inr-gift-card/p/itm3d59225ae5e13
-      - https://www.flipkart.com/playstation-rs-1000-inr-gift-card/p/itmd5aafce6a1678
-      - https://www.flipkart.com/playstation-rs-2000-inr-gift-card/p/itmd41e56cc4ca04
-      - https://www.flipkart.com/2-000-playstation-store-gift-card-india/p/itm083312a90e1aa
-      - https://www.flipkart.com/sony-interactive-entertainment-rs-3000-playstation-store-gift-card/p/itme51240e714e50
-      - https://www.flipkart.com/sony-interactive-entertainment-europe-rs-3000-playstation-store-gift-card-digital-voucher-delivery-email/p/itma3cec289dd512
-      - https://www.flipkart.com/playstation-rs-4000-store-gift-card/p/itm0ceacc74a0363
-      - https://www.flipkart.com/sony-interactive-entertainment-europe-playstation-store-gift-card-4000-inr/p/itm5cb36d77285f5
-      - https://www.flipkart.com/sony-interactive-entertainment-rs-5000-playstation-store-gift-card/p/itm5b2422845fb13
-      - https://www.flipkart.com/sony-interactive-entertainment-europe-playstation-store-gift-card-5000-inr/p/itmb079e5a22622c
-      - https://www.flipkart.com/sony-interactive-entertainment-europe-rs-5000-playstation-store-gift-card-digital-voucher-delivery-email/p/itmcf54504b6dee2
-      - https://www.flipkart.com/playstation-rs-7000-store-gift-card/p/itm3de7db3a72837
-      - https://www.flipkart.com/playstation-rs-8000-store-gift-card/p/itm0031eec1b6662
-      - https://www.flipkart.com/playstation-rs-9000-store-gift-card/p/itm9a5cc90ee3729
-      - https://www.flipkart.com/playstation-rs-12000-store-gift-card/p/itm111d6339f4c1f
-      - https://www.flipkart.com/playstation-rs-13500-store-gift-card/p/itmf5a68356acef9
+      - playstation inr gift card
+    max_pages: 1
 
   amazon:
-    # Amazon blocks most cloud server IPs (HTTP 503). Leave enabled and watch the logs:
-    # if you get a "can't be checked" Telegram warning, set enabled: false.
+    # Amazon search is blocked from cloud servers, so the bot checks the listings below
+    # (via Amazon's mobile product page, which isn't blocked). Paste any Amazon link:
+    # full URL, amzn.in share link, or just the 10-character product ID.
     enabled: true
-    discover_every_cycles: 10
-    search_queries: [playstation store gift card india]
-    asins: []                                # optional: add ASINs you know, e.g. [B0XXXXXXXX]
+    product_urls:
+      - https://www.amazon.in/dp/B093QF35KZ   # Rs.2000 Sony PlayStation Store Gift Card
+      - https://amzn.in/d/0gZDa4MB            # B0C1H3K2V4  PlayStation E-Gift Card (Instant Delivery)
+    # Also checked every `fast_interval_seconds` (restocks here sell out quickly)
+    fast_check:
+      - https://amzn.in/d/0aGMkk6l            # B07K6RYVJ5  Rs.4000 Sony PlayStation Store Gift Card
+    search_queries: []                        # search is blocked from cloud IPs; leave empty
+
+  blinkit:
+    # Blinkit blocks cloud/data-center IPs (Cloudflare 403). Test first from the machine
+    # that will run it:  .venv/bin/python -m psnbot --test-blinkit
+    # If it says BLOCKED there, set enabled: false (or run this check from a home connection).
+    enabled: false
+    pincode: "271001"            # Gonda, Uttar Pradesh
+    lat: 27.1375914              # coordinates for the pincode (Blinkit uses lat/lon, not the pin)
+    lon: 81.9631560
+    product_urls:
+      - https://blinkit.com/prn/sony-playstation-instant-voucher/prid/698590
+    fast_check: true             # also check every fast_interval_seconds
 
   jiogames:
-    # JioGames Store doesn't sell PSN cards right now; this alerts you if they start.
+    # PSN cards appear in store.jiogames.com/collection/playstation when in stock and are
+    # hidden completely when sold out. Restocks are daily, so also checked every
+    # `fast_interval_seconds` (one small API call).
     enabled: true
+    collections: [playstation]
     search_queries: [playstation, psn]
+    fast_check: true

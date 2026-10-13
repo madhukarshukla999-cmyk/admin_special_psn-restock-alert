@@ -37,6 +37,14 @@ sudo journalctl -u psn-bot -f                   # watch the logs
 ```
 The service starts on boot and restarts if it crashes.
 
+### Telegram commands
+Tap the bot's **Menu** button, or type a command:
+- `/menu` — one ✅/🔕 button per store, plus **🔔 All on** and **🔕 All off**. Your choice is saved and survives restarts.
+- `/status` — what's in stock right now, with links.
+- `/help`
+
+Turning a store off only stops its messages (alerts and ⚠️ warnings); it keeps being checked. So when you turn it back on, you only get *new* restocks, not old ones. Only the chat IDs in `.env` can use the menu.
+
 ### Useful commands
 ```bash
 .venv/bin/python -m psnbot --list            # print every listing found right now + stock status

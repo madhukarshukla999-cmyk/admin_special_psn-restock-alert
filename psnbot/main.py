@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from .http import make_client
 from .models import Item, StoreError, TitleFilter
 from .state import State
+from .controls import Controls
 from .stores import REGISTRY
 from .telegram import Telegram
 
@@ -88,6 +89,10 @@ class Bot:
             self.stores.append(store)
         if not self.stores:
             raise SystemExit("No stores enabled in config")
+        self.controls = Controls(self)
+
+    def is_muted(self, store_id: str) -> bool:
+        return store_id in self.state.settings.get("muted", [])
 
     # ------------------------------------------------------------------
     async def run_cycle(self, client) -> None:
@@ -100,6 +105,7 @@ class Bot:
                 continue
             self._apply(store, items, restocked, sold_out, full_listing=True, silent=first_run)
         if first_run:
+            self.state.seeded = True
             await self._send_startup_summary(client)
         await self._notify(client, restocked, sold_out)
         self.state.save()
@@ -127,6 +133,8 @@ class Bot:
         """Compare fresh results with saved state and collect what changed."""
         now = time.time()
         seen_keys = set()
+        # Muted stores (Telegram /menu) still update their state, they just don't notify.
+        silent = silent or self.is_muted(store.id)
         for it in items:
             seen_keys.add(it.key)
             prev = self.state.items.get(it.key)
@@ -171,10 +179,12 @@ class Bot:
             log.warning("%s: check failed (%d in a row): %s", store.name, err["count"], msg)
             if err["count"] >= self.error_alert_after and not err["alerted"]:
                 err["alerted"] = True
-                await self.tg.send(client, f"⚠️ <b>{store.name}</b> can't be checked "
-                                           f"({err['count']} failures in a row).\n<code>{html.escape(msg[:300])}</code>")
+                if not self.is_muted(store.id):
+                    await self.tg.send(client, f"⚠️ <b>{store.name}</b> can't be checked "
+                                               f"({err['count']} failures in a row).\n"
+                                               f"<code>{html.escape(msg[:300])}</code>")
             return None
-        if err["alerted"]:
+        if err["alerted"] and not self.is_muted(store.id):
             await self.tg.send(client, f"✅ <b>{store.name}</b> is being checked again.")
         err.update(count=0, alerted=False, last_error=None)
         in_stock = sum(1 for i in items if i.in_stock)
@@ -195,12 +205,16 @@ class Bot:
             await self.tg.send(client, f"🔴 Sold out on <b>{store_name}</b>:\n{names}")
 
     async def _send_startup_summary(self, client) -> None:
+        active = [s for s in self.stores if not self.is_muted(s.id)]
+        if not active:
+            return   # everything muted via /menu
         by_store: dict[str, list[dict]] = {}
         for rec in self.state.items.values():
-            if rec.get("in_stock"):
+            if rec.get("in_stock") and not self.is_muted(rec["store"]):
                 by_store.setdefault(rec["store"], []).append(rec)
         lines = [f"🤖 <b>PSN gift card tracker started</b>\n<i>{_now()}</i>",
-                 f"Watching: {', '.join(s.name for s in self.stores)}", ""]
+                 f"Watching: {', '.join(s.name for s in active)}",
+                 "Send /menu to turn store notifications on or off.", ""]
         if not by_store:
             lines.append("Nothing is in stock right now. I'll message you the moment something comes back.")
         else:
@@ -244,7 +258,14 @@ class Bot:
             tasks = [loop(self.run_cycle, interval, jitter, "Full check")]
             if fast_interval > 0:
                 tasks.append(loop(self.run_fast_cycle, fast_interval, max(1, fast_interval // 6), "Fast check"))
-            await asyncio.gather(*tasks)
+            if not self.tg.dry_run and self.cfg.get("telegram_menu", True):
+                tasks.append(self.controls.run(client, stop))   # /menu, /status, /help
+            running = [asyncio.create_task(t) for t in tasks]
+            await stop.wait()
+            for t in running:          # e.g. Telegram long-poll waits up to 50 s otherwise
+                t.cancel()
+            await asyncio.gather(*running, return_exceptions=True)
+            self.state.save()
         log.info("Stopped.")
 
 

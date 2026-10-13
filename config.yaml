@@ -8,6 +8,9 @@ store_timeout_seconds: 120     # give up on a store after this long in one cycle
 error_alert_after_failures: 5  # Telegram warning if a store fails this many times in a row
 notify_out_of_stock: false     # true = also message when something sells out
 state_file: data/state.json
+# Telegram /menu to switch store notifications on/off (saved in state_file).
+# Only one running copy per bot token can use it — set false on a second copy (e.g. a home Blinkit copy).
+telegram_menu: true
 
 # Which product titles count as "PlayStation gift card"
 title_filter:

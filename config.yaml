@@ -22,7 +22,9 @@ stores:
 
   gamestheshop:
     enabled: true
-    search_queries: [playstation store gift card]
+    # "gift card" returns only ~17 products (all 8 PSN values among them) in a single page,
+    # so a card can't drop off the results just because of ranking changes.
+    search_queries: [gift card]
     max_pages: 3
 
   digistore:

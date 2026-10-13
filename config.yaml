@@ -58,6 +58,10 @@ stores:
     search_queries: []                        # search is blocked from cloud IPs; leave empty
 
   jiogames:
-    # JioGames Store doesn't sell PSN cards right now; this alerts you if they start.
+    # PSN cards appear in store.jiogames.com/collection/playstation when in stock and are
+    # hidden completely when sold out. Restocks are daily, so also checked every
+    # `fast_interval_seconds` (one small API call).
     enabled: true
+    collections: [playstation]
     search_queries: [playstation, psn]
+    fast_check: true

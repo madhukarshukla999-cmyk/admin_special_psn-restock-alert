@@ -116,8 +116,9 @@ class Bot:
             except Exception as e:  # noqa: BLE001 - errors are counted by the full cycle
                 log.debug("%s: fast check failed: %s", store.name, e)
                 continue
-            if items:
-                self._apply(store, items, restocked, sold_out, full_listing=False, silent=False)
+            full = getattr(store, "fast_is_full_listing", False)
+            if items or (full and items is not None):
+                self._apply(store, items, restocked, sold_out, full_listing=full, silent=False)
         await self._notify(client, restocked, sold_out)
         if restocked or sold_out:
             self.state.save()

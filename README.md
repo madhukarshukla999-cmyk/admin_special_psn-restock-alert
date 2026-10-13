@@ -8,7 +8,7 @@ Checks PlayStation Store gift cards (every value) on several Indian stores every
 | GamesTheShop | Store's own search API | ✅ Works |
 | DigiStore | WooCommerce Store API (`playstation-card` category) | ✅ Works |
 | Flipkart | Search results: a card tile without "Coming Soon" / "Currently unavailable" is in stock | ✅ Works |
-| JioGames Store | Store catalog API | ✅ Works (no PSN cards listed yet) |
+| JioGames Store | PlayStation collection (cards are hidden when sold out), every 60 s | ✅ Works |
 | Amazon.in | Listings from `config.yaml`, checked via the mobile product page (the ₹4000 card every 60 s) | ✅ Works |
 | Blinkit, Paytm, CRED | — | ❌ Not included (see below) |
 

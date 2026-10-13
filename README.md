@@ -9,7 +9,7 @@ Checks PlayStation Store gift cards (every value) on several Indian stores every
 | DigiStore | WooCommerce Store API (`playstation-card` category) | ✅ Works |
 | Flipkart | Search finds the listings, then each product page is checked (schema.org availability) | ✅ Works |
 | JioGames Store | Store catalog API | ✅ Works (no PSN cards listed yet) |
-| Amazon.in | Search plus product pages | ⚠️ Blocks most cloud IPs |
+| Amazon.in | Listings from `config.yaml`, checked via the mobile product page (the ₹4000 card every 60 s) | ✅ Works |
 | Blinkit, Paytm, CRED | — | ❌ Not included (see below) |
 
 ## How alerts work
@@ -42,10 +42,15 @@ The service starts on boot and restarts if it crashes.
 .venv/bin/python -m psnbot --test-telegram   # check the bot can message you
 .venv/bin/python -m psnbot --once --dry-run  # one cycle, print alerts instead of sending
 ```
-To change something, edit `config.yaml` (check interval, stores, search terms, extra Flipkart URLs or Amazon ASINs), then run `sudo systemctl restart psn-bot`. If you edited the copy in `/opt/psn-stock-bot`, that's all. If you edited your clone, run `install.sh` again first.
+To change something, edit `config.yaml` (check intervals, stores, search terms, extra Flipkart or Amazon links), then run `sudo systemctl restart psn-bot`. If you edited the copy in `/opt/psn-stock-bot`, that's all. If you edited your clone, run `install.sh` again first.
+
+## Amazon notes
+- Amazon blocks its normal product page (`/dp/…`) and search for cloud server IPs, but not the mobile product page (`/gp/aw/d/…`), so the bot reads that. Alerts still link to the normal page.
+- Search is blocked, so the bot can't find new listings by itself. To add one, paste the link (any format, including `amzn.in` share links) under `amazon.product_urls` in `config.yaml`.
+- Listings under `amazon.fast_check` are also checked every `fast_interval_seconds` (60 s by default).
+- If Amazon starts blocking the mobile page too, you'll get the ⚠️ "can't be checked" warning, never a false alert.
 
 ## Why some platforms aren't included
-- **Amazon:** it returns HTTP 503 or a captcha to most datacenter IPs, Google Cloud included. If you get the ⚠️ warning, set `amazon.enabled: false`. The alternative is running the bot on a home PC or Raspberry Pi.
 - **Blinkit:** protected by Cloudflare bot blocking (403 from cloud IPs), and it also needs a location.
 - **Paytm, CRED:** app-only and need a logged-in account. Automating them breaks their terms and can get the account banned.
 

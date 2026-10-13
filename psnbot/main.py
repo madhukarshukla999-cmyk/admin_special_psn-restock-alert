@@ -93,46 +93,70 @@ class Bot:
     async def run_cycle(self, client) -> None:
         first_run = self.state.is_new
         results = await asyncio.gather(*(self._check_store(client, s) for s in self.stores))
-
         restocked: dict[str, list[Item]] = {}
         sold_out: dict[str, list[Item]] = {}
-        now = time.time()
         for store, items in zip(self.stores, results):
             if items is None:          # store failed this cycle -> keep previous state untouched
                 continue
-            seen_keys = set()
-            for it in items:
-                seen_keys.add(it.key)
-                prev = self.state.items.get(it.key)
-                prev_stock = prev.get("in_stock") if prev else None
-                if it.in_stock is None:      # undetermined -> don't flip state
-                    if prev:
-                        prev["last_seen"] = now
-                    continue
-                if it.in_stock and prev_stock is not True and not first_run:
-                    restocked.setdefault(store.name, []).append(it)
-                if not it.in_stock and prev_stock is True and not first_run:
-                    sold_out.setdefault(store.name, []).append(it)
-                self.state.items[it.key] = {
-                    "store": it.store, "title": it.title, "url": it.url, "in_stock": it.in_stock,
-                    "price": it.price, "mrp": it.mrp, "last_seen": now,
-                    "last_change": now if (prev_stock != it.in_stock) else (prev or {}).get("last_change", now),
-                }
+            self._apply(store, items, restocked, sold_out, full_listing=True, silent=first_run)
+        if first_run:
+            await self._send_startup_summary(client)
+        await self._notify(client, restocked, sold_out)
+        self.state.save()
+
+    async def run_fast_cycle(self, client) -> None:
+        """Re-check only the priority listings (e.g. Amazon `fast_check`)."""
+        if self.state.is_new:
+            return   # let the first full cycle seed the state and send the summary
+        restocked: dict[str, list[Item]] = {}
+        sold_out: dict[str, list[Item]] = {}
+        for store in self.stores:
+            try:
+                items = await asyncio.wait_for(store.fetch_fast(client), timeout=self.store_timeout)
+            except Exception as e:  # noqa: BLE001 - errors are counted by the full cycle
+                log.debug("%s: fast check failed: %s", store.name, e)
+                continue
+            if items:
+                self._apply(store, items, restocked, sold_out, full_listing=False, silent=False)
+        await self._notify(client, restocked, sold_out)
+        if restocked or sold_out:
+            self.state.save()
+
+    def _apply(self, store, items: list[Item], restocked, sold_out, *, full_listing: bool, silent: bool) -> None:
+        """Compare fresh results with saved state and collect what changed."""
+        now = time.time()
+        seen_keys = set()
+        for it in items:
+            seen_keys.add(it.key)
+            prev = self.state.items.get(it.key)
+            prev_stock = prev.get("in_stock") if prev else None
+            if it.in_stock is None:      # undetermined -> don't flip state
+                if prev:
+                    prev["last_seen"] = now
+                continue
+            if it.in_stock and prev_stock is not True and not silent:
+                restocked.setdefault(store.name, []).append(it)
+            if not it.in_stock and prev_stock is True and not silent:
+                sold_out.setdefault(store.name, []).append(it)
+            self.state.items[it.key] = {
+                "store": it.store, "title": it.title, "url": it.url, "in_stock": it.in_stock,
+                "price": it.price, "mrp": it.mrp, "last_seen": now,
+                "last_change": now if (prev_stock != it.in_stock) else (prev or {}).get("last_change", now),
+            }
+        if full_listing:
             # Items that disappeared from a store's listing are treated as out of stock
             for key, rec in self.state.items.items():
                 if rec.get("store") == store.id and key not in seen_keys and rec.get("in_stock"):
                     rec["in_stock"] = False
                     rec["last_change"] = now
-            if hasattr(store, "known"):
-                self.state.known[store.id] = dict(store.known)
+        if hasattr(store, "known"):
+            self.state.known[store.id] = dict(store.known)
 
-        if first_run:
-            await self._send_startup_summary(client)
+    async def _notify(self, client, restocked, sold_out) -> None:
         if restocked:
             await self._send_restock(client, restocked)
         if sold_out and self.notify_oos:
             await self._send_sold_out(client, sold_out)
-        self.state.save()
 
     async def _check_store(self, client, store) -> list[Item] | None:
         err = self.state.store_errors.setdefault(store.id, {"count": 0, "alerted": False})
@@ -200,18 +224,26 @@ class Bot:
                 loop.add_signal_handler(sig, stop.set)
             except NotImplementedError:
                 pass
-        async with make_client() as client:
+        fast_interval = int(self.cfg.get("fast_interval_seconds", 60))
+
+        async def loop(fn, every: int, spread: int, name: str):
             while not stop.is_set():
                 t0 = time.monotonic()
                 try:
-                    await self.run_cycle(client)
+                    await fn(client)
                 except Exception:  # noqa: BLE001
-                    log.exception("Cycle crashed; will retry next interval")
-                sleep_for = max(10, interval + random.randint(-jitter, jitter) - (time.monotonic() - t0))
+                    log.exception("%s crashed; will retry next interval", name)
+                sleep_for = max(10, every + random.randint(-spread, spread) - (time.monotonic() - t0))
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=sleep_for)
                 except asyncio.TimeoutError:
                     pass
+
+        async with make_client() as client:
+            tasks = [loop(self.run_cycle, interval, jitter, "Full check")]
+            if fast_interval > 0:
+                tasks.append(loop(self.run_fast_cycle, fast_interval, max(1, fast_interval // 6), "Fast check"))
+            await asyncio.gather(*tasks)
         log.info("Stopped.")
 
 

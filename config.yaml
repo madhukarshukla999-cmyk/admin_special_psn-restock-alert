@@ -3,6 +3,7 @@
 
 interval_seconds: 180          # how often to check all stores (3 min)
 interval_jitter_seconds: 30    # random +/- so requests don't look robotic
+fast_interval_seconds: 60      # extra checks for priority listings (amazon.fast_check); 0 = off
 store_timeout_seconds: 120     # give up on a store after this long in one cycle
 error_alert_after_failures: 5  # Telegram warning if a store fails this many times in a row
 notify_out_of_stock: false     # true = also message when something sells out
@@ -57,12 +58,17 @@ stores:
       - https://www.flipkart.com/playstation-rs-13500-store-gift-card/p/itmf5a68356acef9
 
   amazon:
-    # Amazon blocks most cloud server IPs (HTTP 503). Leave enabled and watch the logs:
-    # if you get a "can't be checked" Telegram warning, set enabled: false.
+    # Amazon search is blocked from cloud servers, so the bot checks the listings below
+    # (via Amazon's mobile product page, which isn't blocked). Paste any Amazon link:
+    # full URL, amzn.in share link, or just the 10-character product ID.
     enabled: true
-    discover_every_cycles: 10
-    search_queries: [playstation store gift card india]
-    asins: []                                # optional: add ASINs you know, e.g. [B0XXXXXXXX]
+    product_urls:
+      - https://www.amazon.in/dp/B093QF35KZ   # Rs.2000 Sony PlayStation Store Gift Card
+      - https://amzn.in/d/0gZDa4MB            # B0C1H3K2V4  PlayStation E-Gift Card (Instant Delivery)
+    # Also checked every `fast_interval_seconds` (restocks here sell out quickly)
+    fast_check:
+      - https://amzn.in/d/0aGMkk6l            # B07K6RYVJ5  Rs.4000 Sony PlayStation Store Gift Card
+    search_queries: []                        # search is blocked from cloud IPs; leave empty
 
   jiogames:
     # JioGames Store doesn't sell PSN cards right now; this alerts you if they start.

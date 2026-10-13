@@ -62,14 +62,16 @@ class Flipkart(Store):
                     r = await self.get(client, url)
                 except StoreError as e:
                     failures.append(str(e))
-                    return None
+                    # Unknown this round: keeps the previous state (avoids false restock alerts)
+                    return Item(store=self.id, item_id=itm, title=itm, url=url, in_stock=None)
                 finally:
                     await self.polite_pause(0.5, 1.5)
             return self._parse(itm, url, r.text)
 
-        results = await asyncio.gather(*(check(i, u) for i, u in list(self.known.items())))
+        targets = list(self.known.items())
+        results = await asyncio.gather(*(check(i, u) for i, u in targets))
         items = [x for x in results if x]
-        if not items and failures:
+        if failures and len(failures) == len(targets):
             raise StoreError(failures[0])
         return items
 

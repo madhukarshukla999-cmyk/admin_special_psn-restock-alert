@@ -21,6 +21,10 @@ class Store:
     async def fetch(self, client: httpx.AsyncClient) -> list[Item]:
         raise NotImplementedError
 
+    async def fetch_fast(self, client: httpx.AsyncClient) -> list[Item] | None:
+        """Priority listings checked on the fast interval. None = store has none."""
+        return None
+
     # -- helpers ---------------------------------------------------------
     async def get(self, client: httpx.AsyncClient, url: str, **kw) -> httpx.Response:
         return await self._request(client, "GET", url, **kw)

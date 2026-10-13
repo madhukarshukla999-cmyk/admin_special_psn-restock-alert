@@ -9,6 +9,7 @@ from .base import Store
 
 _PRODUCT_LINK = re.compile(r'/([a-z0-9-]+)/p/(itm[0-9a-z]{13})')
 _LD_JSON = re.compile(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', re.S)
+_HTML_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.S)
 
 
 class Flipkart(Store):
@@ -91,9 +92,23 @@ class Flipkart(Store):
             if title:
                 break
 
+        if not title:
+            # Out-of-stock pages sometimes ship an empty JSON-LD block; fall back to <title>,
+            # e.g. "₹2,000 PlayStation Store Gift Card India Price in India - Buy ..."
+            m = _HTML_TITLE.search(html)
+            if m and " Price in India" in m.group(1):
+                title = " ".join(m.group(1).split(" Price in India")[0].split())
+
         if title and not self.filter.matches(title):
             self.known.pop(itm, None)   # not a PSN card (e.g. memory card); stop checking it
             return None
+
+        # Product pages link to other values of the same card ("similar products");
+        # remember those so new listings are picked up even though search misses them.
+        if title and self.cfg.get("follow_related_links", True):
+            for slug, other in _PRODUCT_LINK.findall(html):
+                if other not in self.known and self.filter.matches(slug):
+                    self.known[other] = f"https://www.flipkart.com/{slug}/p/{other}"
 
         if availability:
             in_stock = availability.rstrip("/").endswith("InStock")

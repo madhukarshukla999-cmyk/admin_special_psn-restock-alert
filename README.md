@@ -10,7 +10,8 @@ Checks PlayStation Store gift cards (every value) on several Indian stores every
 | Flipkart | Search results: a card tile without "Coming Soon" / "Currently unavailable" is in stock | ✅ Works |
 | JioGames Store | PlayStation collection (cards are hidden when sold out), every 60 s | ✅ Works |
 | Amazon.in | Listings from `config.yaml`, checked via the mobile product page (the ₹4000 card every 60 s) | ✅ Works |
-| Blinkit, Paytm, CRED | — | ❌ Not included (see below) |
+| Blinkit | Product API with your location (pincode 271001 → lat/lon) | ⚠️ Off by default; test with `--test-blinkit` (blocks cloud IPs) |
+| Paytm, CRED | — | ❌ Not included (see below) |
 
 ## How alerts work
 - **First start:** one summary message listing what's in stock right now.
@@ -51,7 +52,7 @@ To change something, edit `config.yaml` (check intervals, stores, search terms, 
 - If Amazon starts blocking the mobile page too, you'll get the ⚠️ "can't be checked" warning, never a false alert.
 
 ## Why some platforms aren't included
-- **Blinkit:** protected by Cloudflare bot blocking (403 from cloud IPs), and it also needs a location.
+- **Blinkit:** no login is needed, but Cloudflare blocks cloud/data-center IPs (403). Run `.venv/bin/python -m psnbot --test-blinkit` on the machine that will run the bot. If it isn't blocked, set `blinkit.enabled: true`. If it is, run a second copy at home with only `blinkit` enabled; it can share the same Telegram chat.
 - **Paytm, CRED:** app-only and need a logged-in account. Automating them breaks their terms and can get the account banned.
 
 ## Adding a store

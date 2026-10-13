@@ -260,6 +260,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="print alerts instead of sending to Telegram")
     ap.add_argument("--test-telegram", action="store_true", help="send a test message and exit")
     ap.add_argument("--list", action="store_true", help="print every listing found right now and exit")
+    ap.add_argument("--test-blinkit", action="store_true",
+                    help="check Blinkit once, print what it sees and save the raw response to data/")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -272,6 +274,9 @@ def main() -> None:
 
     if args.list:
         asyncio.run(_list(cfg))
+        return
+    if args.test_blinkit:
+        asyncio.run(_test_blinkit(cfg))
         return
     bot = Bot(cfg, dry_run=args.dry_run)
     if args.test_telegram:
@@ -287,6 +292,36 @@ def main() -> None:
         asyncio.run(_o())
     else:
         asyncio.run(bot.run_forever())
+
+
+async def _test_blinkit(cfg: dict) -> None:
+    from .stores.blinkit import Blinkit, read_stock
+    scfg = dict((cfg.get("stores") or {}).get("blinkit") or {}, save_raw=True)
+    b = Blinkit(scfg, TitleFilter(cfg.get("title_filter", {})))
+    print(f"Location: pincode {scfg.get('pincode')}  lat={scfg.get('lat')} lon={scfg.get('lon')}")
+    from curl_cffi.requests import AsyncSession
+    async with AsyncSession(impersonate="chrome") as s:
+        for prid in b._prids():
+            r = await s.post(f"https://blinkit.com/v1/layout/product/{prid}", headers=b._headers(prid), timeout=30)
+            print(f"\nProduct {prid}: HTTP {r.status_code}, {len(r.text)} bytes")
+            if r.status_code == 403 or "you have been blocked" in r.text.lower():
+                print("  ❌ BLOCKED by Cloudflare — this machine's IP can't reach Blinkit.")
+                continue
+            try:
+                data = r.json()
+            except ValueError:
+                print("  ❌ Not JSON. First 300 chars:", r.text[:300])
+                continue
+            b._save_raw(prid, data)
+            try:
+                stock, info = read_stock(data, prid)
+            except StoreError as e:
+                print("  ❌", e)
+                continue
+            print(f"  name={info['name']!r} price={info['price']} mrp={info['mrp']}")
+            print(f"  signals: {info['signals'] or 'none'}")
+            print("  RESULT:", {True: "✅ IN STOCK", False: "🔴 OUT OF STOCK", None: "❓ UNKNOWN"}[stock])
+            print(f"  Raw response saved to data/blinkit_{prid}.json — send it to me if anything looks wrong.")
 
 
 async def _list(cfg: dict) -> None:

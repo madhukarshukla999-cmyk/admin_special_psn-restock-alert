@@ -3,3 +3,4 @@ PyYAML>=6.0
 selectolax>=0.3.21
 python-dotenv>=1.0
 tzdata
+curl_cffi>=0.7          # Blinkit (Cloudflare needs a real-browser TLS fingerprint)

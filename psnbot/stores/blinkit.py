@@ -90,6 +90,46 @@ def read_stock(data: dict, prid: str) -> tuple[bool | None, dict]:
     return None, info   # nothing found or conflicting -> unknown (never alerts)
 
 
+def read_variants(data: dict) -> list[dict]:
+    """Other card values shown on the page as 'pills' (1000 / 2000 / 3000 / ...).
+    Each pill carries its own product id, state, inventory and price."""
+    out, seen = [], set()
+
+    def walk(o):
+        if isinstance(o, dict):
+            if o.get("widget_type") == "variant_pill_snippet":
+                t = o.get("tracking") or {}
+                im, cm = t.get("impression_map") or {}, t.get("click_map") or {}
+                wm = t.get("widget_meta") or {}
+                pid = str(cm.get("product_id") or wm.get("child_widget_id") or "")
+                if pid and pid not in seen:
+                    seen.add(pid)
+                    out.append({"prid": pid, "value": wm.get("child_widget_title"),
+                                "name": cm.get("name"), "state": str(im.get("state") or cm.get("state") or "").lower(),
+                                "inventory": im.get("inventory", cm.get("inventory")),
+                                "price": im.get("price") or cm.get("price"), "mrp": im.get("mrp") or cm.get("mrp")})
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(data)
+    return out
+
+
+def variant_stock(v: dict) -> bool | None:
+    """Same rule as the main product: state and inventory must agree."""
+    pos = neg = 0
+    st, inv = v["state"], v["inventory"]
+    if st in ("available", "in_stock", "instock"):
+        pos += 1
+    elif any(w in st for w in ("unavailable", "out", "sold", "oos")):
+        neg += 1
+    if isinstance(inv, (int, float)):
+        pos, neg = (pos + 1, neg) if inv > 0 else (pos, neg + 1)
+    return True if pos and not neg else False if neg and not pos else None
+
+
 def proxy_url() -> str | None:
     """Blinkit blocks cloud IPs, so on Heroku route it through a residential proxy:
     BLINKIT_PROXY=http://user:pass@host:port (only Blinkit uses it)."""
@@ -111,6 +151,16 @@ class Blinkit(Store):
         super().__init__(cfg, title_filter)
         self._device = str(uuid.uuid4())
         self._session_id = str(uuid.uuid4())
+
+    def _slug(self) -> str:
+        for entry in self.cfg.get("product_urls", []) or []:
+            m = re.search(r"/prn/([^/]+)/prid/", str(entry))
+            if m:
+                return m.group(1)
+        return "x"
+
+    def _url(self, prid: str) -> str:
+        return f"{BASE}/prn/{self._slug()}/prid/{prid}"
 
     def _prids(self) -> list[str]:
         out = []
@@ -147,21 +197,27 @@ class Blinkit(Store):
     async def _check(self, prids: list[str]) -> list[Item]:
         if AsyncSession is None:
             raise StoreError("Blinkit: install curl_cffi (pip install curl_cffi)")
-        items, errors = [], []
+        items: dict[str, Item] = {}
+        errors = []
         async with session() as s:
             for prid in prids:
+                if prid in items and items[prid].in_stock is not None:
+                    continue                    # already seen as a pill on another page
                 try:
-                    items.append(await self._check_one(s, prid))
+                    for it in await self._check_one(s, prid):
+                        if it.item_id not in items or items[it.item_id].in_stock is None:
+                            items[it.item_id] = it
                 except StoreError as e:
                     errors.append(str(e))
-                    items.append(Item(store=self.id, item_id=prid, title=prid,
-                                      url=f"{BASE}/prn/x/prid/{prid}", in_stock=None))
+                    items.setdefault(prid, Item(store=self.id, item_id=prid, title=prid,
+                                                url=self._url(prid), in_stock=None))
                 await self.polite_pause(1.0, 2.5)
+        items = list(items.values())
         if errors and len(errors) == len(prids):
             raise StoreError(errors[0])
         return items
 
-    async def _check_one(self, s, prid: str) -> Item:
+    async def _check_one(self, s, prid: str) -> list[Item]:
         try:
             r = await s.post(f"{BASE}/v1/layout/product/{prid}", headers=self._headers(prid), timeout=30)
         except Exception as e:  # noqa: BLE001
@@ -183,16 +239,28 @@ class Blinkit(Store):
             raise StoreError(f"Blinkit: couldn't tell stock for {prid} (signals: {info['signals'] or 'none'}); "
                              f"raw response saved to data/blinkit_{prid}.json")
         name = info["name"] or "Sony PlayStation Instant Voucher"
+        note = f"pincode {self.cfg.get('pincode')}" if self.cfg.get("pincode") else ""
 
         def num(v):
             try:
                 return float(str(v).replace("₹", "").replace(",", "").strip())
             except (TypeError, ValueError):
                 return None
-        return Item(store=self.id, item_id=prid, title=str(name),
-                    url=f"{BASE}/prn/x/prid/{prid}", in_stock=in_stock,
-                    price=num(info["price"]), mrp=num(info["mrp"]),
-                    note=f"pincode {self.cfg.get('pincode')}" if self.cfg.get("pincode") else "")
+
+        def title(base, mrp):
+            return f"{base} ₹{mrp:,.0f}" if mrp else str(base)
+
+        main = Item(store=self.id, item_id=prid, title=title(name, num(info["mrp"]) or num(info["price"])),
+                    url=self._url(prid), in_stock=in_stock, price=num(info["price"]), mrp=num(info["mrp"]), note=note)
+        out = [main]
+        for v in read_variants(data):           # the other values on the same page
+            if v["prid"] == prid:
+                continue
+            mrp = num(v["mrp"]) or num(v["value"])
+            out.append(Item(store=self.id, item_id=v["prid"], title=title(v["name"] or name, mrp),
+                            url=self._url(v["prid"]), in_stock=variant_stock(v),
+                            price=num(v["price"]), mrp=mrp, note=note))
+        return out
 
     @staticmethod
     def _save_raw(prid: str, data: dict) -> None:

@@ -517,8 +517,8 @@ class Bot:
                     self._wake.set()
             self.state.settings["last_alive"] = now
             self.state.save()
-            if self.warp:
-                await asyncio.to_thread(self.warp.ensure)
+            if self.warp and await asyncio.to_thread(self.warp.ensure):
+                os.environ["BLINKIT_PROXY"] = warpmod.PROXY_URL
             await _sleep(30, self._stop)
 
     # -- auto-update ---------------------------------------------------------

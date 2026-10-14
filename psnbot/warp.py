@@ -51,6 +51,7 @@ class Warp:
         self.proc: subprocess.Popen | None = None
         self.error: str | None = None
         self.restarts = 0
+        self._last_try = 0.0
 
     # -- setup -------------------------------------------------------------
     def _tools(self) -> tuple[Path, Path]:
@@ -69,8 +70,11 @@ class Warp:
         saved = self.state.settings.get("warp_profile")
         if saved:
             return saved
-        log.info("WARP: registering a free Cloudflare WARP account")
-        for cmd in (["register", "--accept-tos"], ["generate"]):
+        cmds = [["generate"]]
+        if not (self.dir / "wgcf-account.toml").exists():   # reuse an account already on disk
+            log.info("WARP: registering a free Cloudflare WARP account")
+            cmds.insert(0, ["register", "--accept-tos"])
+        for cmd in cmds:
             r = subprocess.run([str(wgcf), *cmd], cwd=self.dir, input="y\n", capture_output=True, text=True, timeout=60)
             if r.returncode != 0:
                 raise RuntimeError(f"wgcf {cmd[0]} failed: {(r.stderr or r.stdout)[-200:]}")
@@ -83,6 +87,7 @@ class Warp:
     # -- run ---------------------------------------------------------------
     def start(self, save: bool = True) -> str | None:
         """Start the tunnel. Returns the proxy URL, or None (error kept in self.error)."""
+        self._last_try = time.time()
         try:
             wgcf, wp = self._tools()
             (self.dir / "wg.conf").write_text(self._profile(wgcf, save))
@@ -111,12 +116,20 @@ class Warp:
     def alive(self) -> bool:
         return bool(self.proc and self.proc.poll() is None)
 
-    def ensure(self) -> None:
-        """Restart the tunnel if it died (called from the heartbeat)."""
-        if self.proc and not self.alive():
+    def ensure(self) -> bool:
+        """Restart the tunnel if it died, or retry a failed start every 5 min (from the heartbeat).
+        Returns True if it (re)started now."""
+        if self.alive():
+            return False
+        if self.proc is None and time.time() - self._last_try < 300:
+            return False
+        if self.proc is not None:
             self.restarts += 1
             log.warning("WARP: tunnel stopped; restarting (%d)", self.restarts)
-            self.start()
+        else:
+            log.info("WARP: retrying tunnel start")
+        self.proc = None
+        return self.start() is not None
 
     def reset_account(self) -> str | None:
         """New WARP account (e.g. if the old one stops working)."""

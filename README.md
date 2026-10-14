@@ -49,6 +49,16 @@ This creates a Task Scheduler task called **PSN Stock Bot**. It runs hidden at l
 - Set Windows Sleep to **Never**, or the checks stop while the PC sleeps.
 - Only one copy can run at a time (`data\bot.lock`), so stop the task before running `python -m psnbot` by hand.
 
+### Heroku (worker dyno + Postgres)
+Heroku wipes the disk on every restart, so the bot saves everything (stock, history, people, settings) to **Heroku Postgres** whenever `DATABASE_URL` is set. On a PC it keeps using `data/state.json`.
+1. Create an app, then **Resources → Add-ons → Heroku Postgres (Essential-0)**. This sets `DATABASE_URL`.
+2. **Settings → Config Vars:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DISABLE_STORES=blinkit` (Blinkit blocks cloud IPs), and optionally the `SMTP_*` settings.
+3. **Deploy → GitHub:** connect this repo, enable **Automatic deploys** from `main`, then click **Deploy Branch**.
+4. **Resources:** turn the **worker** dyno on (the `Procfile` has no web process).
+5. Optional: copy your PC's data into the database. Stop the PC bot, then run on the PC: `set DATABASE_URL=<value from Config Vars>` and `.venv\Scripts\python -m psnbot --import-state data\state.json`.
+
+Only run **one** copy per Telegram bot, so stop the PC task (`uninstall-autostart.ps1`). Auto-update is off on Heroku, since automatic deploys update it. Logs: **More → View logs**.
+
 ### Telegram commands
 Tap the bot's **Menu** button, or type a command:
 - `/menu`: your own ✅/🔕 button per store, **🔔 All on / 🔕 All off**, and switches for **sold-out alerts**, the **daily summary**, **WhatsApp** and **email**

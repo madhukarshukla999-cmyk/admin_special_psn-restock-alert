@@ -65,6 +65,18 @@ def _fmt_item(it: Item) -> str:
     return "\n".join(lines)
 
 
+def store_enabled(sid: str, scfg: dict) -> bool:
+    """config.yaml `enabled`, overridable per machine with env vars, e.g. on Heroku
+    DISABLE_STORES=blinkit (blocked from cloud IPs) or ENABLE_STORES=gyftr,flipkart."""
+    def env_list(name):
+        return {x.strip().lower() for x in os.environ.get(name, "").split(",") if x.strip()}
+    if sid in env_list("DISABLE_STORES"):
+        return False
+    if env_list("ENABLE_STORES"):
+        return sid in env_list("ENABLE_STORES")
+    return bool(scfg.get("enabled", True))
+
+
 def _sort_key(it: Item):
     return (it.denomination or 10**9, it.title)
 
@@ -99,7 +111,9 @@ class Bot:
         self.fast_interval = int(cfg.get("fast_interval_seconds", 60))
         self.down_alert_minutes = float(cfg.get("down_alert_minutes", 10))
         self.summary_time = str(cfg.get("daily_summary_time", "21:00"))
-        self.auto_update = bool(cfg.get("auto_update", True)) and not dry_run
+        # On Heroku there's no git checkout; it redeploys from GitHub itself (automatic deploys).
+        self.on_heroku = bool(os.environ.get("DYNO"))
+        self.auto_update = bool(cfg.get("auto_update", True)) and not dry_run and not self.on_heroku
         self.update_hours = float(cfg.get("auto_update_hours", 6))
         self.repo = Path(__file__).resolve().parent.parent
         self.version = updater.current_version(self.repo)
@@ -117,7 +131,7 @@ class Bot:
         self.stores = []
         for sid, scfg in (cfg.get("stores") or {}).items():
             scfg = scfg or {}
-            if not scfg.get("enabled", True):
+            if not store_enabled(sid, scfg):
                 continue
             if sid not in REGISTRY:
                 log.warning("Unknown store '%s' in config — skipped", sid)
@@ -605,6 +619,9 @@ def main() -> None:
     ap.add_argument("--test-blinkit", action="store_true",
                     help="check Blinkit once, print what it sees and save the raw response to data/")
     ap.add_argument("--log-file", help="also write logs to this file (rotated at 1 MB, 3 kept)")
+    ap.add_argument("--import-state", metavar="FILE",
+                    help="copy a state.json (history, people, settings) into the database (DATABASE_URL) and exit")
+    ap.add_argument("--export-state", metavar="FILE", help="save the current state to a JSON file and exit")
     ap.add_argument("--task-name", help="Windows Task Scheduler task to re-run after an auto-update")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -631,6 +648,9 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     cfg = load_config(Path(args.config).name)
 
+    if args.import_state or args.export_state:
+        _move_state(cfg, args.import_state, args.export_state)
+        return
     if args.list:
         asyncio.run(_list(cfg))
         return
@@ -661,6 +681,25 @@ def main() -> None:
         if bot.restart_requested:
             how = updater.restart(args.task_name)
             log.info("Restarting after update (%s).", how)
+
+
+def _move_state(cfg: dict, import_file: str | None, export_file: str | None) -> None:
+    import json
+    st = State(cfg.get("state_file", "data/state.json"))
+    if export_file:
+        Path(export_file).write_text(st.dumps(), encoding="utf-8")
+        print(f"Exported state ({st.backend}) to {export_file}")
+        return
+    if st.backend != "postgres":
+        raise SystemExit("Set DATABASE_URL first (heroku config:get DATABASE_URL -a <app>).")
+    data = json.loads(Path(import_file).read_text(encoding="utf-8"))
+    st.seeded = bool(data.get("seeded", bool(data.get("items"))))
+    for k in ("items", "store_errors", "known", "settings", "history"):
+        setattr(st, k, data.get(k, {} if k != "history" else []))
+    st.settings.pop("tg_offset", None)       # the new copy starts reading Telegram fresh
+    st.save()
+    users = len(st.settings.get("users", {}))
+    print(f"Imported into the database: {len(st.items)} cards, {len(st.history)} restock events, {users} people.")
 
 
 async def _test_blinkit(cfg: dict) -> None:
@@ -698,7 +737,7 @@ async def _list(cfg: dict) -> None:
     async with make_client() as client:
         for sid, scfg in (cfg.get("stores") or {}).items():
             scfg = scfg or {}
-            if not scfg.get("enabled", True) or sid not in REGISTRY:
+            if not store_enabled(sid, scfg) or sid not in REGISTRY:
                 continue
             store = REGISTRY[sid](scfg, filt)
             try:

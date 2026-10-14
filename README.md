@@ -37,6 +37,17 @@ sudo journalctl -u psn-bot -f                   # watch the logs
 ```
 The service starts on boot and restarts if it crashes.
 
+### Windows PC (start automatically at login)
+From the `psn-stock-bot` folder, after creating `.venv`, installing requirements and filling in `.env`:
+```
+powershell -ExecutionPolicy Bypass -File deploy\windows\install-autostart.ps1
+```
+This creates a Task Scheduler task called **PSN Stock Bot**. It runs hidden at login, restarts if it crashes and keeps running on battery. Logs go to `data\bot.log`.
+- Stop: `schtasks /End /TN "PSN Stock Bot"` · Start: `schtasks /Run /TN "PSN Stock Bot"`
+- Remove: `powershell -ExecutionPolicy Bypass -File deploy\windows\uninstall-autostart.ps1`
+- Set Windows Sleep to **Never**, or the checks stop while the PC sleeps.
+- Only one copy can run at a time (`data\bot.lock`), so stop the task before running `python -m psnbot` by hand.
+
 ### Telegram commands
 Tap the bot's **Menu** button, or type a command:
 - `/menu` — one ✅/🔕 button per store, plus **🔔 All on** and **🔕 All off**. Your choice is saved and survives restarts.

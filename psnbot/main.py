@@ -284,6 +284,7 @@ def main() -> None:
     ap.add_argument("--list", action="store_true", help="print every listing found right now and exit")
     ap.add_argument("--test-blinkit", action="store_true",
                     help="check Blinkit once, print what it sees and save the raw response to data/")
+    ap.add_argument("--log-file", help="also write logs to this file (rotated at 1 MB, 3 kept)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -296,8 +297,16 @@ def main() -> None:
 
     os.chdir(Path(args.config).resolve().parent)
     load_dotenv(".env")
+    handlers: list[logging.Handler] = []
+    if sys.stderr is not None:          # pythonw.exe (no console window) has no stderr
+        handlers.append(logging.StreamHandler())
+    if args.log_file:
+        from logging.handlers import RotatingFileHandler
+        Path(args.log_file).parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(RotatingFileHandler(args.log_file, maxBytes=1_000_000, backupCount=3, encoding="utf-8"))
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+                        handlers=handlers or [logging.NullHandler()])
     logging.getLogger("httpx").setLevel(logging.WARNING)
     cfg = load_config(Path(args.config).name)
 
@@ -320,7 +329,14 @@ def main() -> None:
                 await bot.run_cycle(c)
         asyncio.run(_o())
     else:
-        asyncio.run(bot.run_forever())
+        from .lock import AlreadyRunning, SingleInstance
+        try:
+            with SingleInstance(Path(cfg.get("state_file", "data/state.json")).parent / "bot.lock"):
+                log.info("Bot started (pid %d). Press Ctrl+C to stop.", os.getpid())
+                asyncio.run(bot.run_forever())
+        except AlreadyRunning as e:
+            log.error("%s", e)
+            raise SystemExit(f"{e}\nStop the other copy first (Task Manager → pythonw.exe / python.exe).")
 
 
 async def _test_blinkit(cfg: dict) -> None:

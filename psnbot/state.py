@@ -24,12 +24,14 @@ class State:
         self.known: dict[str, dict[str, str]] = data.get("known", {})
         # User settings from the Telegram menu (muted stores) + polling offset
         self.settings: dict = data.get("settings", {})
+        # Restock events (see history.py)
+        self.history: list[dict] = data.get("history", [])
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
             {"seeded": self.seeded, "items": self.items, "store_errors": self.store_errors,
-             "known": self.known, "settings": self.settings},
+             "known": self.known, "settings": self.settings, "history": self.history},
             indent=1, ensure_ascii=False,
         )
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".state-")

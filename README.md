@@ -51,11 +51,20 @@ This creates a Task Scheduler task called **PSN Stock Bot**. It runs hidden at l
 
 ### Telegram commands
 Tap the bot's **Menu** button, or type a command:
-- `/menu` — one ✅/🔕 button per store, plus **🔔 All on** and **🔕 All off**. Your choice is saved and survives restarts.
-- `/status` — what's in stock right now, with links.
-- `/help`
+- `/menu`: your own ✅/🔕 button per store, **🔔 All on / 🔕 All off**, and switches for **sold-out alerts** and the **daily summary**
+- `/status`: what's in stock right now (and for how long)
+- `/check`: check every store right now
+- `/history`: restocks in the last 7 days and how long each lasted (`/history 30` for 30 days)
+- `/besttime`: when each store usually restocks (needs 3+ restocks on 2+ days)
+- `/health`: is each store being checked OK, version, auto-update status
+- `/users` (owner): who gets alerts; approve or remove people
+- `/update` (owner): install the latest version now
 
-Turning a store off only stops its messages (alerts and ⚠️ warnings); it keeps being checked. So when you turn it back on, you only get *new* restocks, not old ones. Only the chat IDs in `.env` can use the menu.
+**Adding people:** they open the bot in Telegram and tap **Start**. You (the chat ID in `.env`) get **Allow / Deny** buttons. Each person has their own `/menu` settings.
+
+**Automatic messages:** restocks, sold-outs ("was in stock for 6 min"), a daily summary at `daily_summary_time` (IST), a warning when the bot was offline or asleep for more than `down_alert_minutes`, and auto-update notices (owner only).
+
+**Auto-update:** every `auto_update_hours`, the bot runs `git pull`, reinstalls packages if needed and restarts itself. This only works in a git clone. If you edited a file the update changes (e.g. `config.yaml`), it skips the update and tells you. On Windows, re-run `install-autostart.ps1` once so the task can restart itself after updates.
 
 ### Useful commands
 ```bash

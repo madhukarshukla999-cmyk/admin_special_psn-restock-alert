@@ -48,7 +48,7 @@ class Telegram:
                    reply_markup: dict | None = None) -> bool:
         ok = True
         for chunk in _split(html):
-            for chat_id in chat_ids or self.chat_ids:
+            for chat_id in (self.chat_ids if chat_ids is None else chat_ids):
                 if self.dry_run:
                     log.info("[dry-run] Telegram -> %s:\n%s", chat_id, chunk)
                     continue

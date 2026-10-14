@@ -6,7 +6,11 @@ interval_jitter_seconds: 30    # random +/- so requests don't look robotic
 fast_interval_seconds: 60      # extra checks for priority listings (amazon.fast_check); 0 = off
 store_timeout_seconds: 120     # give up on a store after this long in one cycle
 error_alert_after_failures: 5  # Telegram warning if a store fails this many times in a row
-notify_out_of_stock: false     # true = also message when something sells out
+notify_out_of_stock: true      # sold-out alerts ("was in stock for 6 min"); each person can turn them off in /menu
+daily_summary_time: "21:00"    # IST; each person can turn the summary off in /menu
+down_alert_minutes: 10         # message everyone if the bot was offline/asleep longer than this
+auto_update: true              # pull the latest code from GitHub and restart (needs a git clone)
+auto_update_hours: 6           # how often to check for updates (/update checks right away)
 state_file: data/state.json
 # Telegram /menu to switch store notifications on/off (saved in state_file).
 # Only one running copy per bot token can use it — set false on a second copy (e.g. a home Blinkit copy).

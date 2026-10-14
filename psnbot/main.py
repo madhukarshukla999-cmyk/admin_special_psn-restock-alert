@@ -16,12 +16,15 @@ from zoneinfo import ZoneInfo
 import yaml
 from dotenv import load_dotenv
 
+from . import history as hist
+from . import updater
+from .controls import Controls
 from .http import make_client
 from .models import Item, StoreError, TitleFilter
 from .state import State
-from .controls import Controls
 from .stores import REGISTRY
 from .telegram import Telegram
+from .users import Users
 
 log = logging.getLogger("psnbot")
 IST = ZoneInfo("Asia/Kolkata")
@@ -29,6 +32,10 @@ IST = ZoneInfo("Asia/Kolkata")
 
 def _now() -> str:
     return datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST")
+
+
+def _when(ts: float) -> str:
+    return datetime.fromtimestamp(ts, IST).strftime("%d %b %I:%M %p")
 
 
 def _rupees(v) -> str:
@@ -60,8 +67,18 @@ def _sort_key(it: Item):
     return (it.denomination or 10**9, it.title)
 
 
+async def _sleep(seconds: float, *events: asyncio.Event) -> None:
+    """Sleep, but wake early if any event is set."""
+    waits = [asyncio.create_task(e.wait()) for e in events]
+    try:
+        await asyncio.wait(waits, timeout=max(0.0, seconds), return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in waits:
+            t.cancel()
+
+
 class Bot:
-    def __init__(self, cfg: dict, dry_run: bool = False):
+    def __init__(self, cfg: dict, dry_run: bool = False, task_name: str | None = None):
         self.cfg = cfg
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         chats = [c.strip() for c in os.environ.get("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
@@ -71,10 +88,26 @@ class Bot:
             chats = ["dry-run"]
         self.tg = Telegram(token, chats, dry_run=dry_run)
         self.state = State(cfg.get("state_file", "data/state.json"))
+        self.users = Users(self.state, chats)
         self.filter = TitleFilter(cfg.get("title_filter", {}))
         self.error_alert_after = int(cfg.get("error_alert_after_failures", 5))
         self.store_timeout = float(cfg.get("store_timeout_seconds", 120))
-        self.notify_oos = bool(cfg.get("notify_out_of_stock", False))
+        self.notify_oos = bool(cfg.get("notify_out_of_stock", True))
+        self.interval = int(cfg.get("interval_seconds", 180))
+        self.fast_interval = int(cfg.get("fast_interval_seconds", 60))
+        self.down_alert_minutes = float(cfg.get("down_alert_minutes", 10))
+        self.summary_time = str(cfg.get("daily_summary_time", "21:00"))
+        self.auto_update = bool(cfg.get("auto_update", True)) and not dry_run
+        self.update_hours = float(cfg.get("auto_update_hours", 6))
+        self.repo = Path(__file__).resolve().parent.parent
+        self.version = updater.current_version(self.repo)
+        self.task_name = task_name
+        self.started = time.time()
+        self.restart_requested = False
+        self._stop: asyncio.Event | None = None
+        self._wake: asyncio.Event | None = None
+        self._check_requesters: list[str] = []
+        self._updating = False
 
         self.stores = []
         for sid, scfg in (cfg.get("stores") or {}).items():
@@ -90,17 +123,27 @@ class Bot:
             self.stores.append(store)
         if not self.stores:
             raise SystemExit("No stores enabled in config")
+        self.names = {s.id: s.name for s in self.stores}
         self.controls = Controls(self)
 
-    def is_muted(self, store_id: str) -> bool:
-        return store_id in self.state.settings.get("muted", [])
+    async def broadcast(self, client, text: str, *, store_id: str | None = None, pref: str | None = None,
+                        admins_only: bool = False) -> None:
+        ids = self.users.recipients(store_id=store_id, pref=pref, admins_only=admins_only)
+        if ids:
+            await self.tg.send(client, text, chat_ids=ids)
+
+    def request_check(self, cid: str) -> None:
+        self._check_requesters.append(str(cid))
+        if self._wake:
+            self._wake.set()
 
     # ------------------------------------------------------------------
     async def run_cycle(self, client) -> None:
+        t0 = time.monotonic()
         first_run = self.state.is_new
         results = await asyncio.gather(*(self._check_store(client, s) for s in self.stores))
         restocked: dict[str, list[Item]] = {}
-        sold_out: dict[str, list[Item]] = {}
+        sold_out: dict[str, list[tuple[Item, float | None]]] = {}
         for store, items in zip(self.stores, results):
             if items is None:          # store failed this cycle -> keep previous state untouched
                 continue
@@ -109,14 +152,23 @@ class Bot:
             self.state.seeded = True
             await self._send_startup_summary(client)
         await self._notify(client, restocked, sold_out)
+        self.state.settings["last_full_check"] = time.time()
         self.state.save()
+        if self._check_requesters:
+            ids, self._check_requesters = sorted(set(self._check_requesters)), []
+            n = sum(1 for r in self.state.items.values() if r.get("in_stock"))
+            failed = [s.name for s, r in zip(self.stores, results) if r is None]
+            msg = (f"✅ Checked {len(self.stores)} stores in {time.monotonic() - t0:.0f} s. "
+                   f"{n} card{'s' if n != 1 else ''} in stock" + (" (see /status)." if n else ".")
+                   + (f"\n⚠️ Couldn't check: {', '.join(failed)}" if failed else ""))
+            await self.tg.send(client, msg, chat_ids=ids)
 
     async def run_fast_cycle(self, client) -> None:
         """Re-check only the priority listings (e.g. Amazon `fast_check`)."""
         if self.state.is_new:
             return   # let the first full cycle seed the state and send the summary
         restocked: dict[str, list[Item]] = {}
-        sold_out: dict[str, list[Item]] = {}
+        sold_out: dict[str, list[tuple[Item, float | None]]] = {}
         for store in self.stores:
             try:
                 items = await asyncio.wait_for(store.fetch_fast(client), timeout=self.store_timeout)
@@ -131,11 +183,14 @@ class Bot:
             self.state.save()
 
     def _apply(self, store, items: list[Item], restocked, sold_out, *, full_listing: bool, silent: bool) -> None:
-        """Compare fresh results with saved state and collect what changed."""
+        """Compare fresh results with saved state, record history, collect what changed.
+
+        `silent` is only used for the very first check (nothing to compare with yet).
+        Per-person muting happens when sending, so state and history stay complete.
+        """
         now = time.time()
         seen_keys = set()
-        # Muted stores (Telegram /menu) still update their state, they just don't notify.
-        silent = silent or self.is_muted(store.id)
+        events = self.state.history
         for it in items:
             seen_keys.add(it.key)
             prev = self.state.items.get(it.key)
@@ -146,19 +201,27 @@ class Bot:
                 continue
             if it.in_stock and prev_stock is not True and not silent:
                 restocked.setdefault(store.name, []).append(it)
-            if not it.in_stock and prev_stock is True and not silent:
-                sold_out.setdefault(store.name, []).append(it)
+                hist.record_restock(events, it.key, store.id, it.title, it.price, now)
+            if not it.in_stock and prev_stock is True:
+                lasted = hist.record_soldout(events, it.key, now)
+                if not silent:
+                    sold_out.setdefault(store.name, []).append((it, lasted))
             self.state.items[it.key] = {
                 "store": it.store, "title": it.title, "url": it.url, "in_stock": it.in_stock,
                 "price": it.price, "mrp": it.mrp, "last_seen": now,
                 "last_change": now if (prev_stock != it.in_stock) else (prev or {}).get("last_change", now),
             }
         if full_listing:
-            # Items that disappeared from a store's listing are treated as out of stock
+            # Items that disappeared from a store's listing are treated as sold out
             for key, rec in self.state.items.items():
                 if rec.get("store") == store.id and key not in seen_keys and rec.get("in_stock"):
                     rec["in_stock"] = False
                     rec["last_change"] = now
+                    lasted = hist.record_soldout(events, key, now)
+                    if not silent:
+                        gone = Item(store=store.id, item_id=key.split(":", 1)[1], title=rec["title"],
+                                    url=rec["url"], in_stock=False, price=rec.get("price"))
+                        sold_out.setdefault(store.name, []).append((gone, lasted))
         if hasattr(store, "known"):
             self.state.known[store.id] = dict(store.known)
 
@@ -180,92 +243,233 @@ class Bot:
             log.warning("%s: check failed (%d in a row): %s", store.name, err["count"], msg)
             if err["count"] >= self.error_alert_after and not err["alerted"]:
                 err["alerted"] = True
-                if not self.is_muted(store.id):
-                    await self.tg.send(client, f"⚠️ <b>{store.name}</b> can't be checked "
-                                               f"({err['count']} failures in a row).\n"
-                                               f"<code>{html.escape(msg[:300])}</code>")
+                await self.broadcast(client, f"⚠️ <b>{store.name}</b> can't be checked "
+                                             f"({err['count']} failures in a row).\n"
+                                             f"<code>{html.escape(msg[:300])}</code>",
+                                     store_id=store.id, admins_only=True)
             return None
-        if err["alerted"] and not self.is_muted(store.id):
-            await self.tg.send(client, f"✅ <b>{store.name}</b> is being checked again.")
-        err.update(count=0, alerted=False, last_error=None)
+        if err["alerted"]:
+            await self.broadcast(client, f"✅ <b>{store.name}</b> is being checked again.",
+                                 store_id=store.id, admins_only=True)
+        took = time.monotonic() - t0
+        err.update(count=0, alerted=False, last_error=None, last_ok=time.time(), took=round(took, 1))
         in_stock = sum(1 for i in items if i.in_stock)
-        log.info("%s: %d PSN card listings, %d in stock (%.1fs)", store.name, len(items), in_stock,
-                 time.monotonic() - t0)
+        log.info("%s: %d PSN card listings, %d in stock (%.1fs)", store.name, len(items), in_stock, took)
         return items
 
     # ------------------------------------------------------------------
     async def _send_restock(self, client, restocked: dict[str, list[Item]]) -> None:
         for store_name, items in restocked.items():
             body = "\n\n".join(_fmt_item(i) for i in sorted(items, key=_sort_key))
-            await self.tg.send(client, f"🟢 <b>PlayStation gift card back in stock on {store_name}!</b>\n"
-                                       f"<i>{_now()}</i>\n\n{body}")
+            await self.broadcast(client, f"🟢 <b>PlayStation gift card back in stock on {store_name}!</b>\n"
+                                         f"<i>{_now()}</i>\n\n{body}", store_id=items[0].store)
 
-    async def _send_sold_out(self, client, sold_out: dict[str, list[Item]]) -> None:
-        for store_name, items in sold_out.items():
-            names = "\n".join(f"• {html.escape(i.title)}" for i in sorted(items, key=_sort_key))
-            await self.tg.send(client, f"🔴 Sold out on <b>{store_name}</b>:\n{names}")
+    async def _send_sold_out(self, client, sold_out: dict[str, list[tuple[Item, float | None]]]) -> None:
+        for store_name, pairs in sold_out.items():
+            lines = []
+            for it, lasted in sorted(pairs, key=lambda p: _sort_key(p[0])):
+                extra = f" — was in stock for {hist.fmt_duration(lasted)}" if lasted is not None else ""
+                lines.append(f"• {html.escape(it.title)}{extra}")
+            await self.broadcast(client, f"🔴 <b>Sold out on {store_name}</b> · <i>{_now()}</i>\n" + "\n".join(lines),
+                                 store_id=pairs[0][0].store, pref="soldout")
 
-    async def _send_startup_summary(self, client) -> None:
-        active = [s for s in self.stores if not self.is_muted(s.id)]
+    def _summary_for(self, cid: str) -> str | None:
+        muted = self.users.muted(cid)
+        active = [s for s in self.stores if s.id not in muted]
         if not active:
-            return   # everything muted via /menu
+            return None
         by_store: dict[str, list[dict]] = {}
         for rec in self.state.items.values():
-            if rec.get("in_stock") and not self.is_muted(rec["store"]):
+            if rec.get("in_stock") and rec["store"] not in muted:
                 by_store.setdefault(rec["store"], []).append(rec)
         lines = [f"🤖 <b>PSN gift card tracker started</b>\n<i>{_now()}</i>",
                  f"Watching: {', '.join(s.name for s in active)}",
-                 "Send /menu to turn store notifications on or off.", ""]
+                 "Send /menu to choose stores, /help for all commands.", ""]
         if not by_store:
             lines.append("Nothing is in stock right now. I'll message you the moment something comes back.")
         else:
             lines.append("<b>Currently in stock:</b>")
-            names = {s.id: s.name for s in self.stores}
             for sid, recs in by_store.items():
-                lines.append(f"\n<b>{names.get(sid, sid)}</b>")
+                lines.append(f"\n<b>{self.names.get(sid, sid)}</b>")
                 for r in sorted(recs, key=lambda r: r.get("price") or 0):
                     lines.append(f'• <a href="{html.escape(r["url"], quote=True)}">{html.escape(r["title"])}</a>'
                                  f" — {_rupees(r.get('price'))}")
-            lines.append("\nFrom now on I'll only message you when something comes back in stock.")
-        await self.tg.send(client, "\n".join(lines))
+            lines.append("\nFrom now on I'll only message you when something changes.")
+        return "\n".join(lines)
+
+    async def _send_startup_summary(self, client) -> None:
+        for cid in self.users.recipients():
+            text = self._summary_for(cid)
+            if text:
+                await self.tg.send(client, text, chat_ids=[cid])
+
+    # -- daily summary -----------------------------------------------------
+    def daily_summary_text(self, cid: str, now: float | None = None) -> str:
+        now = now or time.time()
+        muted = self.users.muted(cid)
+        evs = [e for e in hist.recent(self.state.history, 86400, now) if e["store"] not in muted]
+        lines = [f"📰 <b>Daily summary</b> · {datetime.fromtimestamp(now, IST).strftime('%d %b %Y')}", ""]
+        if evs:
+            lines.append(f"<b>{len(evs)} restock{'s' if len(evs) != 1 else ''} in the last 24 h</b>")
+            for e in sorted(evs, key=lambda e: e["start"])[:20]:
+                lasted = "still in stock" if e.get("end") is None else f"lasted {hist.fmt_duration(e['end'] - e['start'])}"
+                lines.append(f"• {_when(e['start'])} · {self.names.get(e['store'], e['store'])} · "
+                             f"{html.escape(e['title'][:50])} · {lasted}")
+            if len(evs) > 20:
+                lines.append(f"…and {len(evs) - 20} more (/history)")
+        else:
+            lines.append("No restocks in the last 24 h.")
+        n = sum(1 for r in self.state.items.values() if r.get("in_stock") and r["store"] not in muted)
+        lines.append(f"\n📦 In stock right now: {n}" + (" (/status)" if n else ""))
+        bad = [s.name for s in self.stores if (self.state.store_errors.get(s.id) or {}).get("count", 0)
+               >= self.error_alert_after and s.id not in muted]
+        if bad:
+            lines.append(f"⚠️ Can't be checked: {', '.join(bad)}")
+        down = sum(min(e, now) - max(s, now - 86400) for s, e in self.state.settings.get("downtime", [])
+                   if e > now - 86400)
+        if down > 60:
+            lines.append(f"😴 I was offline for {hist.fmt_duration(down)} in the last 24 h, so restocks then were missed.")
+        lines.append("\n⏰ /besttime shows when each store usually restocks.")
+        return "\n".join(lines)
+
+    async def _daily_summary_loop(self, client) -> None:
+        try:
+            hh, mm = (int(x) for x in self.summary_time.split(":"))
+        except ValueError:
+            log.error("daily_summary_time must look like 21:00; daily summary disabled")
+            return
+        while not self._stop.is_set():
+            now = datetime.now(IST)
+            due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            today = now.strftime("%Y-%m-%d")
+            # Send at the set time, or up to 3 h late if the PC was off/asleep then.
+            if (self.state.seeded and due <= now < due.replace(hour=min(23, hh + 3), minute=59)
+                    and self.state.settings.get("last_summary") != today):
+                self.state.settings["last_summary"] = today
+                self.state.save()
+                for cid in self.users.recipients(pref="summary"):
+                    await self.tg.send(client, self.daily_summary_text(cid), chat_ids=[cid])
+            await _sleep(60, self._stop)
+
+    # -- "bot was down" -----------------------------------------------------
+    async def _heartbeat_loop(self, client) -> None:
+        while not self._stop.is_set():
+            now = time.time()
+            last = self.state.settings.get("last_alive")
+            if last and self.state.seeded and now - last > self.down_alert_minutes * 60:
+                dt = self.state.settings.setdefault("downtime", [])
+                dt.append([last, now])
+                dt[:] = [d for d in dt if d[1] > now - 7 * 86400]
+                await self.broadcast(client,
+                    f"😴 <b>I was offline</b> from {_when(last)} to {_when(now)} "
+                    f"({hist.fmt_duration(now - last)}).\nThe PC was probably off, asleep or without internet, "
+                    "so any restocks in that time were missed. Checking every store now.")
+                if self._wake:
+                    self._wake.set()
+            self.state.settings["last_alive"] = now
+            self.state.save()
+            await _sleep(30, self._stop)
+
+    # -- auto-update ---------------------------------------------------------
+    async def run_update(self, client, manual_cid: str | None = None) -> None:
+        if self._updating:
+            return
+        self._updating = True
+        try:
+            res = await asyncio.to_thread(updater.check_and_update, self.repo)
+            st = self.state.settings
+            st["last_update_check"] = time.time()
+            reply = None
+            if res.status == "updated":
+                new = updater.current_version(self.repo)
+                changes = html.escape(res.changes[:1500]) or "• (no description)"
+                how = updater.restart_mode(self.task_name)
+                tail = ("Restarting now…" if how != "manual" else
+                        "Close the bot window and start it again to use the new version.")
+                await self.broadcast(client, f"⬆️ <b>Updated</b> {html.escape(self.version)} → "
+                                             f"{html.escape(new)}\n{changes}\n\n{tail}", admins_only=True)
+                st.pop("last_update_error", None)
+                self.state.save()
+                if how != "manual":
+                    self.restart_requested = True
+                    self._stop.set()
+                return
+            if res.status == "up-to-date":
+                reply = f"✅ Already up to date ({html.escape(self.version)})."
+            else:
+                reply = f"{'⚠️' if res.status == 'error' else 'ℹ️'} Auto-update: {html.escape(res.message)}"
+                if not manual_cid and st.get("last_update_error") != res.message:
+                    st["last_update_error"] = res.message      # tell admins once per distinct problem
+                    await self.broadcast(client, reply, admins_only=True)
+            self.state.save()
+            if manual_cid and reply:
+                await self.tg.send(client, reply, chat_ids=[manual_cid])
+        finally:
+            self._updating = False
+
+    async def _update_loop(self, client) -> None:
+        await _sleep(120, self._stop)          # let startup settle first
+        while not self._stop.is_set():
+            last = self.state.settings.get("last_update_check") or 0
+            wait = last + self.update_hours * 3600 - time.time()
+            if wait <= 0:
+                try:
+                    await self.run_update(client)
+                except Exception:  # noqa: BLE001
+                    log.exception("Auto-update failed")
+                wait = self.update_hours * 3600
+            await _sleep(min(wait, 3600), self._stop)
 
     # ------------------------------------------------------------------
     async def run_forever(self) -> None:
-        interval = int(self.cfg.get("interval_seconds", 180))
         jitter = int(self.cfg.get("interval_jitter_seconds", 30))
-        stop = asyncio.Event()
+        self._stop = stop = asyncio.Event()
+        self._wake = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, stop.set)
             except NotImplementedError:
                 pass
-        fast_interval = int(self.cfg.get("fast_interval_seconds", 60))
 
-        async def loop(fn, every: int, spread: int, name: str):
+        async def repeat(fn, every: int, spread: int, name: str, wake: asyncio.Event | None = None):
             while not stop.is_set():
                 t0 = time.monotonic()
                 try:
                     await fn(client)
                 except Exception:  # noqa: BLE001
                     log.exception("%s crashed; will retry next interval", name)
-                sleep_for = max(10, every + random.randint(-spread, spread) - (time.monotonic() - t0))
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=sleep_for)
-                except asyncio.TimeoutError:
-                    pass
+                await _sleep(max(10, every + random.randint(-spread, spread) - (time.monotonic() - t0)),
+                             stop, *([wake] if wake else []))
+                if wake:
+                    wake.clear()
 
+        async def guarded(coro_fn, name):
+            try:
+                await coro_fn(client)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("%s stopped unexpectedly", name)
+
+        log.info("Version %s", self.version)
         async with make_client() as client:
-            tasks = [loop(self.run_cycle, interval, jitter, "Full check")]
-            if fast_interval > 0:
-                tasks.append(loop(self.run_fast_cycle, fast_interval, max(1, fast_interval // 6), "Fast check"))
+            tasks = [repeat(self.run_cycle, self.interval, jitter, "Full check", self._wake),
+                     guarded(self._heartbeat_loop, "Heartbeat"),
+                     guarded(self._daily_summary_loop, "Daily summary")]
+            if self.fast_interval > 0:
+                tasks.append(repeat(self.run_fast_cycle, self.fast_interval, max(1, self.fast_interval // 6),
+                                    "Fast check"))
             if not self.tg.dry_run and self.cfg.get("telegram_menu", True):
-                tasks.append(self.controls.run(client, stop))   # /menu, /status, /help
+                tasks.append(self.controls.run(client, stop))   # Telegram commands
+            if self.auto_update:
+                tasks.append(guarded(self._update_loop, "Auto-update"))
             running = [asyncio.create_task(t) for t in tasks]
             await stop.wait()
             for t in running:          # e.g. Telegram long-poll waits up to 50 s otherwise
                 t.cancel()
             await asyncio.gather(*running, return_exceptions=True)
+            self.state.settings["last_alive"] = time.time()
             self.state.save()
         log.info("Stopped.")
 
@@ -285,6 +489,7 @@ def main() -> None:
     ap.add_argument("--test-blinkit", action="store_true",
                     help="check Blinkit once, print what it sees and save the raw response to data/")
     ap.add_argument("--log-file", help="also write logs to this file (rotated at 1 MB, 3 kept)")
+    ap.add_argument("--task-name", help="Windows Task Scheduler task to re-run after an auto-update")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -316,7 +521,7 @@ def main() -> None:
     if args.test_blinkit:
         asyncio.run(_test_blinkit(cfg))
         return
-    bot = Bot(cfg, dry_run=args.dry_run)
+    bot = Bot(cfg, dry_run=args.dry_run, task_name=args.task_name)
     if args.test_telegram:
         async def _t():
             async with make_client() as c:
@@ -331,12 +536,15 @@ def main() -> None:
     else:
         from .lock import AlreadyRunning, SingleInstance
         try:
-            with SingleInstance(Path(cfg.get("state_file", "data/state.json")).parent / "bot.lock"):
+            with SingleInstance(Path(cfg.get("state_file", "data/state.json")).parent / "bot.lock", wait=30):
                 log.info("Bot started (pid %d). Press Ctrl+C to stop.", os.getpid())
                 asyncio.run(bot.run_forever())
         except AlreadyRunning as e:
             log.error("%s", e)
             raise SystemExit(f"{e}\nStop the other copy first (Task Manager → pythonw.exe / python.exe).")
+        if bot.restart_requested:
+            how = updater.restart(args.task_name)
+            log.info("Restarting after update (%s).", how)
 
 
 async def _test_blinkit(cfg: dict) -> None:

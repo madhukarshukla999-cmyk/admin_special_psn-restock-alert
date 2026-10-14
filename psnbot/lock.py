@@ -6,6 +6,7 @@ The OS releases the lock automatically if the process dies.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 
@@ -14,13 +15,12 @@ class AlreadyRunning(RuntimeError):
 
 
 class SingleInstance:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, wait: float = 0):
         self.path = Path(path)
+        self.wait = wait        # seconds to wait for a previous copy to exit (e.g. after auto-update)
         self._fh = None
 
-    def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "a+", encoding="utf-8")
+    def _try_lock(self) -> bool:
         try:
             if os.name == "nt":
                 import msvcrt
@@ -29,9 +29,19 @@ class SingleInstance:
             else:
                 import fcntl
                 fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
         except OSError:
-            self._fh.close()
-            raise AlreadyRunning(f"Another copy of the bot is already running (lock: {self.path})")
+            return False
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a+", encoding="utf-8")
+        deadline = time.monotonic() + self.wait
+        while not self._try_lock():
+            if time.monotonic() >= deadline:
+                self._fh.close()
+                raise AlreadyRunning(f"Another copy of the bot is already running (lock: {self.path})")
+            time.sleep(1)
         self._fh.seek(0)
         self._fh.truncate()
         self._fh.write(str(os.getpid()))

@@ -12,7 +12,7 @@ if (-not (Test-Path $PyW))    { throw "Not found: $PyW`nRun 'python -m venv .ven
 if (-not (Test-Path (Join-Path $Root ".env"))) { throw "Missing .env in $Root (Telegram token + chat id)." }
 
 $action   = New-ScheduledTaskAction -Execute $PyW `
-              -Argument "-m psnbot -c `"$Config`" --log-file `"$Log`"" -WorkingDirectory $Root
+              -Argument "-m psnbot -c `"$Config`" --log-file `"$Log`" --task-name `"$TaskName`"" -WorkingDirectory $Root
 $trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet `
               -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `

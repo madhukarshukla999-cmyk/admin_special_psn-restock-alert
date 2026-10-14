@@ -72,6 +72,12 @@ stores:
       - https://blinkit.com/prn/sony-playstation-instant-voucher/prid/698590
     fast_check: true             # also check every fast_interval_seconds
 
+  rooter:
+    # https://shop.rooter.gg/product/playstation-gift-cards (Rs.1000–5000 wallet codes)
+    enabled: true
+    products: [playstation-gift-cards]
+    fast_check: true             # also check every fast_interval_seconds (one page request)
+
   jiogames:
     # PSN cards appear in store.jiogames.com/collection/playstation when in stock and are
     # hidden completely when sold out. Restocks are daily, so also checked every

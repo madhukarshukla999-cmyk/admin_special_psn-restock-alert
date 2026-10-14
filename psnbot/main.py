@@ -778,6 +778,13 @@ async def _test_blinkit(cfg: dict) -> None:
             print(f"  name={info['name']!r} price={info['price']} mrp={info['mrp']}")
             print(f"  signals: {info['signals'] or 'none'}")
             print("  RESULT:", {True: "✅ IN STOCK", False: "🔴 OUT OF STOCK", None: "❓ UNKNOWN"}[stock])
+            from .stores.blinkit import read_variants, variant_stock
+            vs = read_variants(data)
+            if vs:
+                print(f"  All values on this page ({len(vs)}):")
+                for v in vs:
+                    st = {True: "✅ IN STOCK", False: "🔴 out", None: "❓ unknown"}[variant_stock(v)]
+                    print(f"    ₹{v['value']}: {st}  (prid {v['prid']}, state={v['state']}, inventory={v['inventory']})")
             print(f"  Raw response saved to data/blinkit_{prid}.json — send it to me if anything looks wrong.")
     if tunnel:
         tunnel.stop()

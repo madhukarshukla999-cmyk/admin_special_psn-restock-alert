@@ -23,6 +23,8 @@ from .http import make_client
 from .models import Item, StoreError, TitleFilter
 from .state import State
 from .stores import REGISTRY
+from .channels import Mailer, html_to_text, send_whatsapp
+from .stores.base import Store
 from .telegram import Telegram
 from .users import Users
 
@@ -108,6 +110,9 @@ class Bot:
         self._wake: asyncio.Event | None = None
         self._check_requesters: list[str] = []
         self._updating = False
+        self._resched: dict[str, asyncio.Event] = {}
+        self._bg: set[asyncio.Task] = set()
+        self.mailer = Mailer()
 
         self.stores = []
         for sid, scfg in (cfg.get("stores") or {}).items():
@@ -124,30 +129,95 @@ class Bot:
         if not self.stores:
             raise SystemExit("No stores enabled in config")
         self.names = {s.id: s.name for s in self.stores}
+        self._locks = {s.id: asyncio.Lock() for s in self.stores}
         self.controls = Controls(self)
 
     async def broadcast(self, client, text: str, *, store_id: str | None = None, pref: str | None = None,
-                        admins_only: bool = False) -> None:
+                        admins_only: bool = False, subject: str | None = None) -> None:
+        """Send to everyone who should get it. With `subject`, also WhatsApp + email (in the background)."""
         ids = self.users.recipients(store_id=store_id, pref=pref, admins_only=admins_only)
         if ids:
             await self.tg.send(client, text, chat_ids=ids)
+        if subject and not admins_only:
+            task = asyncio.create_task(self._send_extra(client, text, subject, store_id, pref))
+            self._bg.add(task)
+            task.add_done_callback(self._bg.discard)
+
+    async def _send_extra(self, client, text: str, subject: str, store_id, pref) -> None:
+        wa_text = f"{html_to_text(text, whatsapp=True)}"
+        for cid, ch in self.users.channel_recipients("whatsapp", store_id, pref):
+            ok, detail = await send_whatsapp(client, ch["phone"], ch["apikey"], wa_text)
+            await self._channel_result(client, cid, "whatsapp", ch, ok, detail)
+            await asyncio.sleep(1.5)        # CallMeBot rate limit
+        for cid, ch in self.users.channel_recipients("email", store_id, pref):
+            ok, detail = await self.mailer.send(ch["address"], subject, text)
+            await self._channel_result(client, cid, "email", ch, ok, detail)
+
+    async def _channel_result(self, client, cid, name, ch, ok, detail) -> None:
+        if ok:
+            ch["fail"] = 0
+            return
+        ch["fail"] = ch.get("fail", 0) + 1
+        log.warning("%s alert to %s failed (%d): %s", name, cid, ch["fail"], detail)
+        if ch["fail"] == 3:                  # tell the person once, on Telegram
+            label = "WhatsApp" if name == "whatsapp" else "Email"
+            await self.tg.send(client, f"⚠️ {label} alerts aren't getting through:\n"
+                                       f"<code>{html.escape(detail[:200])}</code>\n"
+                                       f"Check /{name}.", chat_ids=[cid])
+        self.state.save()
 
     def request_check(self, cid: str) -> None:
         self._check_requesters.append(str(cid))
         if self._wake:
             self._wake.set()
 
+    # -- check cycles -------------------------------------------------------
+    def has_fast(self, store) -> bool:
+        return type(store).fetch_fast is not Store.fetch_fast and bool(store.cfg.get("fast_check"))
+
+    def default_intervals(self, store) -> tuple[int, int | None]:
+        full = int(store.cfg.get("interval_seconds") or self.interval)
+        fast = self.fast_interval if (self.has_fast(store) and self.fast_interval > 0) else None
+        return full, fast
+
+    def intervals(self, store) -> tuple[int, int | None]:
+        """(full check seconds, priority check seconds or None). /cycles overrides the config."""
+        full, fast = self.default_intervals(store)
+        ov = self.state.settings.get("intervals", {}).get(store.id, {})
+        full = int(ov.get("full", full))
+        if "fast" in ov and self.has_fast(store):
+            fast = int(ov["fast"]) or None
+        return full, fast
+
+    def set_interval(self, store_id: str, kind: str, seconds: int | None) -> None:
+        """kind 'full' or 'fast'; seconds None = back to default, 0 (fast) = off."""
+        ov = self.state.settings.setdefault("intervals", {}).setdefault(store_id, {})
+        if seconds is None:
+            ov.pop(kind, None)
+        else:
+            ov[kind] = int(seconds)
+        if not ov:
+            self.state.settings["intervals"].pop(store_id, None)
+        self.state.save()
+        if store_id in self._resched:
+            self._resched[store_id].set()
+
     # ------------------------------------------------------------------
     async def run_cycle(self, client) -> None:
+        """Check every store now (startup, /check, after being offline)."""
         t0 = time.monotonic()
         first_run = self.state.is_new
-        results = await asyncio.gather(*(self._check_store(client, s) for s in self.stores))
         restocked: dict[str, list[Item]] = {}
         sold_out: dict[str, list[tuple[Item, float | None]]] = {}
-        for store, items in zip(self.stores, results):
-            if items is None:          # store failed this cycle -> keep previous state untouched
-                continue
-            self._apply(store, items, restocked, sold_out, full_listing=True, silent=first_run)
+
+        async def one(store):
+            async with self._locks[store.id]:
+                items = await self._check_store(client, store)
+                if items is not None:
+                    self._apply(store, items, restocked, sold_out, full_listing=True, silent=first_run)
+                return items
+
+        results = await asyncio.gather(*(one(s) for s in self.stores))
         if first_run:
             self.state.seeded = True
             await self._send_startup_summary(client)
@@ -163,24 +233,83 @@ class Bot:
                    + (f"\n⚠️ Couldn't check: {', '.join(failed)}" if failed else ""))
             await self.tg.send(client, msg, chat_ids=ids)
 
-    async def run_fast_cycle(self, client) -> None:
-        """Re-check only the priority listings (e.g. Amazon `fast_check`)."""
-        if self.state.is_new:
-            return   # let the first full cycle seed the state and send the summary
-        restocked: dict[str, list[Item]] = {}
-        sold_out: dict[str, list[tuple[Item, float | None]]] = {}
-        for store in self.stores:
-            try:
-                items = await asyncio.wait_for(store.fetch_fast(client), timeout=self.store_timeout)
-            except Exception as e:  # noqa: BLE001 - errors are counted by the full cycle
-                log.debug("%s: fast check failed: %s", store.name, e)
-                continue
-            full = getattr(store, "fast_is_full_listing", False)
-            if items or (full and items is not None):
-                self._apply(store, items, restocked, sold_out, full_listing=full, silent=False)
-        await self._notify(client, restocked, sold_out)
-        if restocked or sold_out:
+    async def run_store(self, client, store, fast: bool = False) -> None:
+        """One scheduled check of one store (full, or just its priority listings)."""
+        async with self._locks[store.id]:
+            if fast:
+                try:
+                    items = await asyncio.wait_for(store.fetch_fast(client), timeout=self.store_timeout)
+                except Exception as e:  # noqa: BLE001 - errors are counted by full checks
+                    log.debug("%s: priority check failed: %s", store.name, e)
+                    return
+                full = getattr(store, "fast_is_full_listing", False)
+                if not (items or (full and items is not None)):
+                    return
+                log.info("%s: priority check, %d listing(s), %d in stock", store.name, len(items),
+                         sum(1 for i in items if i.in_stock))
+            else:
+                items, full = await self._check_store(client, store), True
+                if items is None:
+                    self.state.save()
+                    return
+            restocked: dict[str, list[Item]] = {}
+            sold_out: dict[str, list[tuple[Item, float | None]]] = {}
+            self._apply(store, items, restocked, sold_out, full_listing=full, silent=self.state.is_new)
+            await self._notify(client, restocked, sold_out)
             self.state.save()
+
+    async def _store_loop(self, client, store) -> None:
+        stop, ev = self._stop, self._resched[store.id]
+        jitter_cap = int(self.cfg.get("interval_jitter_seconds", 30))
+
+        def spread(sec):
+            j = min(jitter_cap, sec // 10)
+            return sec + random.randint(-j, j) if j else sec
+
+        full, fast = self.intervals(store)
+        now = time.time()
+        next_full = now + spread(full)          # the startup check just did a full check
+        next_fast = now + fast if fast else None
+        while not stop.is_set():
+            now = time.time()
+            try:
+                if now >= next_full:
+                    await self.run_store(client, store)
+                    full, fast = self.intervals(store)
+                    next_full = time.time() + spread(full)
+                    next_fast = time.time() + fast if fast else None   # a full check covers them too
+                elif next_fast and now >= next_fast:
+                    await self.run_store(client, store, fast=True)
+                    next_fast = time.time() + fast
+            except Exception:  # noqa: BLE001
+                log.exception("%s check crashed; will retry", store.name)
+                next_full = max(next_full, time.time() + 30)
+            wake_at = min(next_full, next_fast or float("inf"))
+            await _sleep(wake_at - time.time(), stop, ev)
+            if ev.is_set():                     # /cycles changed this store
+                ev.clear()
+                full, fast = self.intervals(store)
+                now = time.time()
+                next_full = min(next_full, now + full)
+                next_fast = min(next_fast or float("inf"), now + fast) if fast else None
+
+    async def _scheduler(self, client) -> None:
+        try:
+            await self.run_cycle(client)        # startup: everything once, then each store on its own cycle
+        except Exception:  # noqa: BLE001
+            log.exception("Startup check crashed")
+        await asyncio.gather(*(self._store_loop(client, s) for s in self.stores),
+                             self._manual_check_loop(client))
+
+    async def _manual_check_loop(self, client) -> None:
+        while not self._stop.is_set():
+            await _sleep(3600, self._stop, self._wake)
+            if self._wake.is_set() and not self._stop.is_set():
+                self._wake.clear()
+                try:
+                    await self.run_cycle(client)
+                except Exception:  # noqa: BLE001
+                    log.exception("Check-now crashed")
 
     def _apply(self, store, items: list[Item], restocked, sold_out, *, full_listing: bool, silent: bool) -> None:
         """Compare fresh results with saved state, record history, collect what changed.
@@ -262,7 +391,8 @@ class Bot:
         for store_name, items in restocked.items():
             body = "\n\n".join(_fmt_item(i) for i in sorted(items, key=_sort_key))
             await self.broadcast(client, f"🟢 <b>PlayStation gift card back in stock on {store_name}!</b>\n"
-                                         f"<i>{_now()}</i>\n\n{body}", store_id=items[0].store)
+                                         f"<i>{_now()}</i>\n\n{body}", store_id=items[0].store,
+                                 subject=f"🟢 PlayStation card back in stock on {store_name}")
 
     async def _send_sold_out(self, client, sold_out: dict[str, list[tuple[Item, float | None]]]) -> None:
         for store_name, pairs in sold_out.items():
@@ -271,7 +401,8 @@ class Bot:
                 extra = f" — was in stock for {hist.fmt_duration(lasted)}" if lasted is not None else ""
                 lines.append(f"• {html.escape(it.title)}{extra}")
             await self.broadcast(client, f"🔴 <b>Sold out on {store_name}</b> · <i>{_now()}</i>\n" + "\n".join(lines),
-                                 store_id=pairs[0][0].store, pref="soldout")
+                                 store_id=pairs[0][0].store, pref="soldout",
+                                 subject=f"🔴 PlayStation card sold out on {store_name}")
 
     def _summary_for(self, cid: str) -> str | None:
         muted = self.users.muted(cid)
@@ -422,27 +553,15 @@ class Bot:
 
     # ------------------------------------------------------------------
     async def run_forever(self) -> None:
-        jitter = int(self.cfg.get("interval_jitter_seconds", 30))
         self._stop = stop = asyncio.Event()
         self._wake = asyncio.Event()
+        self._resched = {s.id: asyncio.Event() for s in self.stores}
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, stop.set)
             except NotImplementedError:
                 pass
-
-        async def repeat(fn, every: int, spread: int, name: str, wake: asyncio.Event | None = None):
-            while not stop.is_set():
-                t0 = time.monotonic()
-                try:
-                    await fn(client)
-                except Exception:  # noqa: BLE001
-                    log.exception("%s crashed; will retry next interval", name)
-                await _sleep(max(10, every + random.randint(-spread, spread) - (time.monotonic() - t0)),
-                             stop, *([wake] if wake else []))
-                if wake:
-                    wake.clear()
 
         async def guarded(coro_fn, name):
             try:
@@ -454,12 +573,9 @@ class Bot:
 
         log.info("Version %s", self.version)
         async with make_client() as client:
-            tasks = [repeat(self.run_cycle, self.interval, jitter, "Full check", self._wake),
+            tasks = [guarded(self._scheduler, "Store checks"),
                      guarded(self._heartbeat_loop, "Heartbeat"),
                      guarded(self._daily_summary_loop, "Daily summary")]
-            if self.fast_interval > 0:
-                tasks.append(repeat(self.run_fast_cycle, self.fast_interval, max(1, self.fast_interval // 6),
-                                    "Fast check"))
             if not self.tg.dry_run and self.cfg.get("telegram_menu", True):
                 tasks.append(self.controls.run(client, stop))   # Telegram commands
             if self.auto_update:

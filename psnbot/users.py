@@ -72,6 +72,26 @@ class Users:
             out.append(cid)
         return out
 
+    # -- WhatsApp / email ------------------------------------------------
+    def channel(self, cid, name: str) -> dict | None:
+        """{'phone','apikey','on'} for whatsapp, {'address','on'} for email; None if not set up."""
+        return (self.get(cid) or {}).get(name)
+
+    def set_channel(self, cid, name: str, data: dict | None) -> None:
+        rec = self.all[str(cid)]
+        if data is None:
+            rec.pop(name, None)
+        else:
+            rec[name] = data
+
+    def channel_on(self, cid, name: str) -> bool:
+        ch = self.channel(cid, name)
+        return bool(ch and ch.get("on", True))
+
+    def channel_recipients(self, name: str, store_id: str | None = None, pref: str | None = None) -> list[tuple[str, dict]]:
+        return [(cid, self.channel(cid, name)) for cid in self.recipients(store_id=store_id, pref=pref)
+                if self.channel_on(cid, name)]
+
     # -- requests --------------------------------------------------------
     def request(self, cid, name: str) -> bool:
         """Register a join request. Returns True if it's new (admins should be told)."""

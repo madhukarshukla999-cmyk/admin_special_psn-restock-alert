@@ -15,9 +15,11 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 import time
 
 from . import history as hist
+from .channels import CALLMEBOT_HELP, CALLMEBOT_NUMBER, EMAIL_RE, clean_phone, send_whatsapp
 
 log = logging.getLogger(__name__)
 
@@ -28,10 +30,37 @@ COMMANDS = [
     {"command": "history", "description": "Restocks in the last 7 days"},
     {"command": "besttime", "description": "When stores usually restock"},
     {"command": "health", "description": "Is every store being checked OK"},
+    {"command": "cycles", "description": "See/change how often each store is checked"},
+    {"command": "whatsapp", "description": "Get alerts on WhatsApp too"},
+    {"command": "email", "description": "Get alerts by email too"},
     {"command": "users", "description": "(owner) Who gets alerts"},
     {"command": "update", "description": "(owner) Install the latest version"},
     {"command": "help", "description": "How this bot works"},
 ]
+
+
+FULL_PRESETS = [30, 60, 120, 180, 300, 600, 900, 1800]
+FAST_PRESETS = [0, 20, 30, 45, 60, 120]
+RISKY = {"amazon", "flipkart", "blinkit"}      # may block very frequent checks
+
+
+def fmt_secs(sec: int | None) -> str:
+    if not sec:
+        return "off"
+    if sec < 60:
+        return f"{sec} s"
+    return f"{sec // 60} min" + (f" {sec % 60} s" if sec % 60 else "")
+
+
+def parse_secs(raw: str) -> int | None:
+    raw = raw.strip().lower()
+    if raw in ("off", "0"):
+        return 0
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(s|sec|secs|m|min|mins|h)?", raw)
+    if not m:
+        return None
+    n, unit = float(m.group(1)), (m.group(2) or "s")
+    return int(n * (3600 if unit == "h" else 60 if unit.startswith("m") else 1))
 
 
 def _ago(ts: float | None) -> str:
@@ -65,6 +94,7 @@ class Controls:
         lines += ["",
                   f"🔴 Sold-out alerts: <b>{'on' if self.users.pref(cid, 'soldout') else 'off'}</b>",
                   f"📰 Daily summary: <b>{'on' if self.users.pref(cid, 'summary') else 'off'}</b>",
+                  self._channel_line(cid, "whatsapp"), self._channel_line(cid, "email"),
                   "", "Tap a button to switch it.",
                   "<i>Muted stores keep being checked, so switching one back on only sends new restocks.</i>"]
         return "\n".join(lines)
@@ -79,8 +109,60 @@ class Controls:
         so, su = self.users.pref(cid, "soldout"), self.users.pref(cid, "summary")
         rows.append([{"text": f"{'✅' if so else '🔕'} Sold-out alerts", "callback_data": "p:soldout"},
                      {"text": f"{'✅' if su else '🔕'} Daily summary", "callback_data": "p:summary"}])
+        ch_row = []
+        for name, label in (("whatsapp", "WhatsApp"), ("email", "Email")):
+            if self.users.channel(cid, name):
+                on = self.users.channel_on(cid, name)
+                ch_row.append({"text": f"{'✅' if on else '🔕'} {label}", "callback_data": f"p:{name}"})
+        if ch_row:
+            rows.append(ch_row)
         rows.append([{"text": "🔄 Refresh", "callback_data": "refresh"}])
         return {"inline_keyboard": rows}
+
+    def _channel_line(self, cid, name: str) -> str:
+        label = "💬 WhatsApp" if name == "whatsapp" else "📧 Email"
+        ch = self.users.channel(cid, name)
+        if not ch:
+            return f"{label}: not set up (/{name})"
+        who = ch.get("phone") or ch.get("address")
+        return f"{label}: <b>{'on' if ch.get('on', True) else 'off'}</b> ({html.escape(str(who))})"
+
+    # -- check cycles ------------------------------------------------------
+    def cycles_view(self, cid) -> tuple[str, dict | None]:
+        b = self.bot
+        lines = ["⏱ <b>How often each store is checked</b>", ""]
+        for s in b.stores:
+            full, fast = b.intervals(s)
+            dfull, dfast = b.default_intervals(s)
+            extra = f" · priority cards every <b>{fmt_secs(fast)}</b>" if b.has_fast(s) else ""
+            changed = " ✏️" if (full, fast) != (dfull, dfast) else ""
+            lines.append(f"• <b>{html.escape(s.name)}</b>: every <b>{fmt_secs(full)}</b>{extra}{changed}")
+        if not self.users.is_admin(cid):
+            return "\n".join(lines), None
+        lines += ["", "Tap a store to change it. ✏️ = changed from the default.",
+                  "<i>Or type e.g. /cycle amazon 2m, /cycle amazon fast 30s, /cycle amazon default</i>"]
+        btns = [{"text": f"⏱ {s.name}", "callback_data": f"cy:{s.id}"} for s in b.stores]
+        rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    def cycle_store_view(self, sid: str) -> tuple[str, dict]:
+        b = self.bot
+        s = next(x for x in b.stores if x.id == sid)
+        full, fast = b.intervals(s)
+        dfull, dfast = b.default_intervals(s)
+        lines = [f"⏱ <b>{html.escape(s.name)}</b>", "",
+                 f"Full check: every <b>{fmt_secs(full)}</b> (default {fmt_secs(dfull)})"]
+        rows = [[{"text": ("✅ " if p == full else "") + fmt_secs(p), "callback_data": f"cy:{sid}:f:{p}"}
+                 for p in FULL_PRESETS[i:i + 4]] for i in range(0, len(FULL_PRESETS), 4)]
+        if b.has_fast(s):
+            lines.append(f"Priority cards: every <b>{fmt_secs(fast)}</b> (default {fmt_secs(dfast)})")
+            rows.append([{"text": ("✅ " if (p or None) == fast else "") + "⚡" + fmt_secs(p),
+                          "callback_data": f"cy:{sid}:q:{p}"} for p in FAST_PRESETS])
+        if sid in RISKY and (full < 60 or (fast and fast < 30)):
+            lines.append("\n⚠️ Very frequent checks can get blocked by this store for a while.")
+        rows.append([{"text": "↩️ Default", "callback_data": f"cy:{sid}:r"},
+                     {"text": "⬅️ All stores", "callback_data": "cy:list"}])
+        return "\n".join(lines), {"inline_keyboard": rows}
 
     def status_text(self, cid) -> str:
         muted = self.users.muted(cid)
@@ -144,7 +226,7 @@ class Controls:
         st = b.state.settings
         lines += ["",
                   f"🤖 Running for {hist.fmt_duration(time.time() - b.started)} · version {html.escape(b.version)}",
-                  f"🔁 Full check every ~{b.interval}s, fast check every {b.fast_interval}s",
+                  "🔁 Check cycles: /cycles",
                   f"👥 {len(self.users.active())} people get alerts"
                   + (f", {len(self.users.pending())} waiting for approval" if self.users.pending() else ""),
                   f"⬆️ Auto-update: {'on' if b.auto_update else 'off'}"
@@ -175,8 +257,10 @@ class Controls:
             "/check: check every store now\n"
             "/history: restocks in the last 7 days\n"
             "/besttime: when each store usually restocks\n"
-            "/health: is every store being checked OK\n\n"
-            "Owner only: /users (who gets alerts), /update (install the latest version)\n\n"
+            "/health: is every store being checked OK\n"
+            "/cycles: how often each store is checked\n"
+            "/whatsapp, /email: get alerts there too (on/off any time)\n\n"
+            "Owner only: /users (who gets alerts), /update (install the latest version), changing /cycles\n\n"
             "Turning a store off only stops its messages; it's still checked in the background.")
 
     # -- handling --------------------------------------------------------
@@ -233,6 +317,15 @@ class Controls:
                 self._last_manual_check = time.time()
                 await send("🔎 Checking every store now… I'll reply when it's done.")
                 self.bot.request_check(cid)
+        elif cmd in ("/cycles", "/intervals"):
+            text, kb = self.cycles_view(cid)
+            await send(text, **({"reply_markup": kb} if kb else {}))
+        elif cmd == "/cycle":
+            await send(self._cycle_command(cid, args))
+        elif cmd == "/whatsapp":
+            await send(await self._whatsapp_command(client, cid, args))
+        elif cmd == "/email":
+            await send(await self._email_command(cid, args))
         elif cmd == "/users" and admin:
             text, kb = self.users_view()
             await send(text, reply_markup=kb)
@@ -255,6 +348,9 @@ class Controls:
         if data.startswith("u:"):
             await self._on_user_button(client, cq, cid, data)
             return
+        if data.startswith("cy:"):
+            await self._on_cycle_button(client, cq, cid, data)
+            return
 
         ids = {s.id: s.name for s in self.bot.stores}
         muted = self.users.muted(cid)
@@ -270,12 +366,157 @@ class Controls:
         elif data in ("p:soldout", "p:summary"):
             on = self.users.toggle_pref(cid, data[2:])
             note = f"{'Sold-out alerts' if data == 'p:soldout' else 'Daily summary'}: {'on ✅' if on else 'off 🔕'}"
+        elif data in ("p:whatsapp", "p:email") and self.users.channel(cid, data[2:]):
+            ch = self.users.channel(cid, data[2:])
+            ch["on"] = not ch.get("on", True)
+            note = f"{'WhatsApp' if data == 'p:whatsapp' else 'Email'} alerts: {'on ✅' if ch['on'] else 'off 🔕'}"
         if data != "refresh":
             self.users.set_muted(cid, muted)
             self._save()
             log.info("%s settings: %s", cid, note)
         await self.tg.answer_callback(client, cq["id"], note)
         await self.tg.edit(client, cid, msg.get("message_id"), self.menu_text(cid), self.menu_markup(cid))
+
+    async def _on_cycle_button(self, client, cq, cid, data) -> None:
+        msg_id = (cq.get("message") or {}).get("message_id")
+        if data == "cy:list":
+            text, kb = self.cycles_view(cid)
+            await self.tg.answer_callback(client, cq["id"])
+            await self.tg.edit(client, cid, msg_id, text, kb)
+            return
+        if not self.users.is_admin(cid):
+            await self.tg.answer_callback(client, cq["id"], "Only the owner can change this")
+            return
+        parts = data.split(":")
+        sid = parts[1]
+        if sid not in self.bot.names:
+            await self.tg.answer_callback(client, cq["id"], "Unknown store")
+            return
+        note = ""
+        if len(parts) == 4 and parts[2] in ("f", "q") and parts[3].isdigit():
+            kind, sec = ("full" if parts[2] == "f" else "fast"), int(parts[3])
+            self.bot.set_interval(sid, kind, sec)
+            note = f"{self.bot.names[sid]}: {'full check' if kind == 'full' else 'priority cards'} every {fmt_secs(sec)}"
+        elif len(parts) == 3 and parts[2] == "r":
+            self.bot.set_interval(sid, "full", None)
+            self.bot.set_interval(sid, "fast", None)
+            note = f"{self.bot.names[sid]}: back to default"
+        if note:
+            log.info("Cycles: %s", note)
+        await self.tg.answer_callback(client, cq["id"], note)
+        text, kb = self.cycle_store_view(sid)
+        await self.tg.edit(client, cid, msg_id, text, kb)
+
+    def _cycle_command(self, cid, args: list[str]) -> str:
+        if not self.users.is_admin(cid):
+            return "Only the owner can change check cycles. See them with /cycles."
+        usage = ("Usage: <code>/cycle amazon 2m</code>, <code>/cycle amazon fast 30s</code> "
+                 "(or <code>fast off</code>), <code>/cycle amazon default</code>\nStores: "
+                 + ", ".join(self.bot.names))
+        if len(args) < 2:
+            return usage
+        sid = args[0].lower()
+        store = next((s for s in self.bot.stores if s.id == sid or s.name.lower().startswith(sid)), None)
+        if not store:
+            return f"Unknown store '{html.escape(args[0])}'.\n" + usage
+        if args[1].lower() in ("default", "reset"):
+            self.bot.set_interval(store.id, "full", None)
+            self.bot.set_interval(store.id, "fast", None)
+            return f"↩️ {store.name}: back to the default ({fmt_secs(self.bot.intervals(store)[0])})."
+        fast = args[1].lower() in ("fast", "priority")
+        raw = args[2] if fast and len(args) > 2 else (None if fast else args[1])
+        sec = parse_secs(raw) if raw else None
+        if sec is None:
+            return usage
+        if fast:
+            if not self.bot.has_fast(store):
+                return f"{store.name} has no priority cards; change its full check instead."
+            if sec and sec < 15:
+                return "Priority checks can't be faster than 15 s."
+            self.bot.set_interval(store.id, "fast", sec)
+            msg = (f"⚡ {store.name}: priority cards every {fmt_secs(sec)}." if sec else
+                   f"⚡ {store.name}: priority checks off (its cards are still checked with the full check).")
+        else:
+            if sec < 20:
+                return "Full checks can't be faster than 20 s."
+            self.bot.set_interval(store.id, "full", sec)
+            msg = f"⏱ {store.name}: full check every {fmt_secs(sec)}."
+        if store.id in RISKY and ((not fast and sec < 60) or (fast and sec and sec < 30)):
+            msg += "\n⚠️ That's very frequent; this store may block checks for a while."
+        return msg
+
+    # -- WhatsApp / email ----------------------------------------------------
+    async def _whatsapp_command(self, client, cid, args: list[str]) -> str:
+        ch = self.users.channel(cid, "whatsapp")
+        sub = args[0].lower() if args else ""
+        if sub in ("on", "off") and ch:
+            ch["on"] = sub == "on"
+            self._save()
+            return f"💬 WhatsApp alerts {'on ✅' if ch['on'] else 'off 🔕'}."
+        if sub == "remove" and ch:
+            self.users.set_channel(cid, "whatsapp", None)
+            self._save()
+            return "💬 WhatsApp removed."
+        if sub == "test" and ch:
+            ok, d = await send_whatsapp(client, ch["phone"], ch["apikey"], "✅ Test from your PSN card bot.")
+            return "✅ Test sent, check WhatsApp." if ok else f"❌ Failed: <code>{html.escape(d)}</code>"
+        if len(args) >= 2:
+            phone, key = clean_phone(args[0]), args[1].strip()
+            if not phone:
+                return "That phone number doesn't look right. Use e.g. <code>/whatsapp 919876543210 123456</code>"
+            ok, d = await send_whatsapp(client, phone, key, "✅ Your PSN card bot will send alerts here.")
+            if not ok:
+                return (f"❌ WhatsApp test failed: <code>{html.escape(d)}</code>\n"
+                        "Check the number (with country code) and the API key from CallMeBot.")
+            self.users.set_channel(cid, "whatsapp", {"phone": phone, "apikey": key, "on": True})
+            self._save()
+            return "✅ WhatsApp linked! You should have a test message. Turn it on/off any time in /menu."
+        status = (f"Now: <b>{'on' if ch.get('on', True) else 'off'}</b> for +{ch['phone']}. "
+                  "<code>/whatsapp on|off|test|remove</code>\n\n" if ch else "")
+        return (f"💬 <b>WhatsApp alerts</b>\n{status}"
+                "Set up (free, ~1 minute, via CallMeBot):\n"
+                f"1. Save <b>{CALLMEBOT_NUMBER}</b> in your phone contacts.\n"
+                "2. On WhatsApp, send it: <code>I allow callmebot to send me messages</code>\n"
+                "3. It replies with your API key.\n"
+                "4. Send here: <code>/whatsapp YOURNUMBER APIKEY</code> (e.g. <code>/whatsapp 919876543210 123456</code>)\n\n"
+                f"<i>If that number doesn't reply, check {CALLMEBOT_HELP} for the current one.</i>\n"
+                "You get restock and sold-out alerts there (same stores as /menu).")
+
+    async def _email_command(self, cid, args: list[str]) -> str:
+        mailer = self.bot.mailer
+        ch = self.users.channel(cid, "email")
+        sub = args[0].lower() if args else ""
+        if sub in ("on", "off") and ch:
+            ch["on"] = sub == "on"
+            self._save()
+            return f"📧 Email alerts {'on ✅' if ch['on'] else 'off 🔕'}."
+        if sub == "remove" and ch:
+            self.users.set_channel(cid, "email", None)
+            self._save()
+            return "📧 Email removed."
+        if not mailer.configured:
+            if self.users.is_admin(cid):
+                return ("📧 Email isn't set up yet. Add these lines to <code>.env</code> and restart the bot:\n"
+                        "<code>SMTP_HOST=smtp.gmail.com\nSMTP_PORT=587\nSMTP_USER=you@gmail.com\n"
+                        "SMTP_PASSWORD=your-16-letter-app-password</code>\n\n"
+                        "For Gmail, the password must be an <b>App Password</b> (Google Account → Security → "
+                        "2-Step Verification → App passwords), not your normal password.")
+            return "📧 Email alerts aren't available yet. Ask the bot's owner to set them up."
+        if sub == "test" and ch:
+            ok, d = await mailer.send(ch["address"], "✅ Test from your PSN card bot", "Email alerts work.")
+            return "✅ Test sent, check your inbox (and spam)." if ok else f"❌ Failed: <code>{html.escape(d)}</code>"
+        if args and EMAIL_RE.match(args[0]):
+            ok, d = await mailer.send(args[0], "✅ PSN card alerts linked",
+                                      "You'll get PlayStation gift card restock alerts here.")
+            if not ok:
+                return f"❌ Couldn't send to that address: <code>{html.escape(d)}</code>"
+            self.users.set_channel(cid, "email", {"address": args[0], "on": True})
+            self._save()
+            return "✅ Email linked! Check your inbox (and spam) for a test. Turn it on/off any time in /menu."
+        status = (f"Now: <b>{'on' if ch.get('on', True) else 'off'}</b> for {html.escape(ch['address'])}. "
+                  "<code>/email on|off|test|remove</code>\n\n" if ch else "")
+        return (f"📧 <b>Email alerts</b>\n{status}"
+                "Send <code>/email you@example.com</code> to get restock and sold-out alerts by email too.")
 
     async def _on_user_button(self, client, cq, cid, data) -> None:
         if not self.users.is_admin(cid):

@@ -51,12 +51,15 @@ This creates a Task Scheduler task called **PSN Stock Bot**. It runs hidden at l
 
 ### Telegram commands
 Tap the bot's **Menu** button, or type a command:
-- `/menu`: your own ✅/🔕 button per store, **🔔 All on / 🔕 All off**, and switches for **sold-out alerts** and the **daily summary**
+- `/menu`: your own ✅/🔕 button per store, **🔔 All on / 🔕 All off**, and switches for **sold-out alerts**, the **daily summary**, **WhatsApp** and **email**
 - `/status`: what's in stock right now (and for how long)
 - `/check`: check every store right now
 - `/history`: restocks in the last 7 days and how long each lasted (`/history 30` for 30 days)
 - `/besttime`: when each store usually restocks (needs 3+ restocks on 2+ days)
 - `/health`: is each store being checked OK, version, auto-update status
+- `/cycles`: how often each store is checked. The owner can tap a store to change it, or type `/cycle amazon 2m`, `/cycle amazon fast 30s` (priority cards), or `/cycle amazon default`
+- `/whatsapp`: get alerts on WhatsApp too, via the free CallMeBot service; follow the steps it shows. `/whatsapp on|off|test|remove`
+- `/email you@example.com`: get alerts by email too (the owner sets `SMTP_*` in `.env` first; see `.env.example`). `/email on|off|test|remove`
 - `/users` (owner): who gets alerts; approve or remove people
 - `/update` (owner): install the latest version now
 

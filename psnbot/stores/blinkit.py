@@ -20,7 +20,6 @@ _PRID = re.compile(r"/prid/(\d+)")
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
-_OOS_WORDS = ("out of stock", "sold out", "notify me", "currently unavailable", "unavailable")
 _NOT_SERVICEABLE = ("not serviceable", "coming soon to your area", "don't deliver", "do not deliver",
                     "currently unavailable in your area", "unserviceable")
 
@@ -75,17 +74,9 @@ def read_stock(data: dict, prid: str) -> tuple[bool | None, dict]:
                 info["signals"].append("unavailable_quantity")
                 neg += 1
 
-    # Visible button / label texts on the product's buy area
-    for path, k, v in _walk(data):
-        if k == "text" and isinstance(v, str) and ("product_atc" in path or "add_to_cart" in path
-                                                    or "atc_strip" in path or "stepper" in path):
-            t = v.lower()
-            if any(w in t for w in _OOS_WORDS):
-                info["signals"].append(f"button='{v}'")
-                neg += 1
-            elif t in ("add", "add to cart"):
-                info["signals"].append(f"button='{v}'")
-                pos += 1
+    # Button labels ("Add to cart") are deliberately NOT used: Blinkit's response contains them
+    # as templates even when the product is out of stock (seen on prid 698590: state=out_of_stock,
+    # inventory=0, yet 4x "Add to cart"). Only this product's own state/inventory decide.
 
     if pos and not neg:
         return True, info

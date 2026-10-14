@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import signal
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -285,6 +286,13 @@ def main() -> None:
                     help="check Blinkit once, print what it sees and save the raw response to data/")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+
+    # Windows consoles/log files default to cp1252, which can't print ₹ or emoji.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
     os.chdir(Path(args.config).resolve().parent)
     load_dotenv(".env")

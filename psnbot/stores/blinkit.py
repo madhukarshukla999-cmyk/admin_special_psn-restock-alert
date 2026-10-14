@@ -195,4 +195,4 @@ class Blinkit(Store):
     def _save_raw(prid: str, data: dict) -> None:
         p = Path("data") / f"blinkit_{prid}.json"
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(data, indent=1, ensure_ascii=False))
+        p.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")

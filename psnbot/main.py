@@ -517,8 +517,8 @@ class Bot:
                     self._wake.set()
             self.state.settings["last_alive"] = now
             self.state.save()
-            if self.warp:
-                await asyncio.to_thread(self.warp.ensure)
+            if self.warp and await asyncio.to_thread(self.warp.ensure):
+                os.environ["BLINKIT_PROXY"] = warpmod.PROXY_URL
             await _sleep(30, self._stop)
 
     # -- auto-update ---------------------------------------------------------
@@ -572,6 +572,12 @@ class Bot:
             await _sleep(min(wait, 3600), self._stop)
 
     # ------------------------------------------------------------------
+    async def start_tunnel(self) -> None:
+        if self.warp and not self.warp.alive():
+            proxy = await asyncio.to_thread(self.warp.start)
+            if proxy:
+                os.environ["BLINKIT_PROXY"] = proxy
+
     async def run_forever(self) -> None:
         self._stop = stop = asyncio.Event()
         self._wake = asyncio.Event()
@@ -592,10 +598,7 @@ class Bot:
                 log.exception("%s stopped unexpectedly", name)
 
         log.info("Version %s", self.version)
-        if self.warp:
-            proxy = await asyncio.to_thread(self.warp.start)
-            if proxy:
-                os.environ["BLINKIT_PROXY"] = proxy
+        await self.start_tunnel()
         async with make_client() as client:
             tasks = [guarded(self._scheduler, "Store checks"),
                      guarded(self._heartbeat_loop, "Heartbeat"),
@@ -678,8 +681,13 @@ def main() -> None:
         asyncio.run(_t())
     elif args.once:
         async def _o():
-            async with make_client() as c:
-                await bot.run_cycle(c)
+            await bot.start_tunnel()
+            try:
+                async with make_client() as c:
+                    await bot.run_cycle(c)
+            finally:
+                if bot.warp:
+                    bot.warp.stop()
         asyncio.run(_o())
     else:
         from .lock import AlreadyRunning, SingleInstance

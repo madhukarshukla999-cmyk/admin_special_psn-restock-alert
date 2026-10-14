@@ -227,7 +227,7 @@ class Controls:
         lines += ["",
                   f"🤖 Running for {hist.fmt_duration(time.time() - b.started)} · version {html.escape(b.version)}",
                   "🔁 Check cycles: /cycles",
-                  *([("🛡 Blinkit tunnel (WARP): " + ("✅ up" if b.warp.alive() else f"❌ down ({html.escape(b.warp.error or '?')})")
+                  *([(f"🛡 WARP tunnel ({', '.join(b.names[s] for s in sorted(b.warp_stores))}): " + ("✅ up" if b.warp.alive() else f"❌ down ({html.escape(b.warp.error or '?')})")
                       + (f", restarted {b.warp.restarts}×" if b.warp.restarts else ""))] if b.warp else []),
                   f"👥 {len(self.users.active())} people get alerts"
                   + (f", {len(self.users.pending())} waiting for approval" if self.users.pending() else ""),

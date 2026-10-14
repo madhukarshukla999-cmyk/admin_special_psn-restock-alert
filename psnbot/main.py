@@ -146,7 +146,9 @@ class Bot:
         self.names = {s.id: s.name for s in self.stores}
         self._locks = {s.id: asyncio.Lock() for s in self.stores}
         self.warp = None
-        if warpmod.enabled() and "blinkit" in self.names:
+        self.warp_stores = warpmod.stores() & set(self.names) if warpmod.enabled() else set()
+        self._warp_client = None
+        if self.warp_stores:
             self.warp = warpmod.Warp(self.state)
         self.controls = Controls(self)
 
@@ -256,7 +258,8 @@ class Bot:
         async with self._locks[store.id]:
             if fast:
                 try:
-                    items = await asyncio.wait_for(store.fetch_fast(client), timeout=self.store_timeout)
+                    items = await asyncio.wait_for(store.fetch_fast(self._client_for(store, client)),
+                                                   timeout=self.store_timeout)
                 except Exception as e:  # noqa: BLE001 - errors are counted by full checks
                     log.debug("%s: priority check failed: %s", store.name, e)
                     return
@@ -382,7 +385,7 @@ class Bot:
         err = self.state.store_errors.setdefault(store.id, {"count": 0, "alerted": False})
         t0 = time.monotonic()
         try:
-            items = await asyncio.wait_for(store.fetch(client), timeout=self.store_timeout)
+            items = await asyncio.wait_for(store.fetch(self._client_for(store, client)), timeout=self.store_timeout)
         except (StoreError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001 - one store must not kill the bot
             msg = str(e) or e.__class__.__name__
             err["count"] += 1
@@ -518,7 +521,7 @@ class Bot:
             self.state.settings["last_alive"] = now
             self.state.save()
             if self.warp and await asyncio.to_thread(self.warp.ensure):
-                os.environ["BLINKIT_PROXY"] = warpmod.PROXY_URL
+                self._use_tunnel()
             await _sleep(30, self._stop)
 
     # -- auto-update ---------------------------------------------------------
@@ -576,7 +579,20 @@ class Bot:
         if self.warp and not self.warp.alive():
             proxy = await asyncio.to_thread(self.warp.start)
             if proxy:
-                os.environ["BLINKIT_PROXY"] = proxy
+                self._use_tunnel()
+
+    def _use_tunnel(self) -> None:
+        if "blinkit" in self.warp_stores:
+            os.environ["BLINKIT_PROXY"] = warpmod.PROXY_URL
+        if self._warp_client is None and self.warp_stores - {"blinkit"}:
+            self._warp_client = make_client(proxy=warpmod.HTTPX_PROXY)
+        log.info("Through WARP: %s", ", ".join(self.names[s] for s in sorted(self.warp_stores)))
+
+    def _client_for(self, store, client):
+        """Stores in WARP_STORES use the tunnel (if it's up); everything else connects directly."""
+        if store.id in self.warp_stores and self._warp_client is not None and self.warp.alive():
+            return self._warp_client
+        return client
 
     async def run_forever(self) -> None:
         self._stop = stop = asyncio.Event()
@@ -614,9 +630,15 @@ class Bot:
             await asyncio.gather(*running, return_exceptions=True)
             self.state.settings["last_alive"] = time.time()
             self.state.save()
+        await self.stop_tunnel()
+        log.info("Stopped.")
+
+    async def stop_tunnel(self) -> None:
+        if self._warp_client is not None:
+            await self._warp_client.aclose()
+            self._warp_client = None
         if self.warp:
             self.warp.stop()
-        log.info("Stopped.")
 
 
 def load_config(path: str) -> dict:
@@ -686,8 +708,7 @@ def main() -> None:
                 async with make_client() as c:
                     await bot.run_cycle(c)
             finally:
-                if bot.warp:
-                    bot.warp.stop()
+                await bot.stop_tunnel()
         asyncio.run(_o())
     else:
         from .lock import AlreadyRunning, SingleInstance
@@ -764,21 +785,33 @@ async def _test_blinkit(cfg: dict) -> None:
 
 async def _list(cfg: dict) -> None:
     filt = TitleFilter(cfg.get("title_filter", {}))
-    async with make_client() as client:
+    tunnel, via = None, set()
+    if warpmod.enabled():
+        tunnel = warpmod.Warp(State(cfg.get("state_file", "data/state.json")))
+        ok = await asyncio.to_thread(tunnel.start)
+        via = warpmod.stores() if ok else set()
+        print(f"WARP tunnel: {'up' if ok else 'FAILED (' + str(tunnel.error) + ')'}"
+              + (f", used for: {', '.join(sorted(via))}" if via else ""))
+        if ok and "blinkit" in via:
+            os.environ["BLINKIT_PROXY"] = warpmod.PROXY_URL
+    async with make_client() as direct, make_client(proxy=warpmod.HTTPX_PROXY) as tunneled:
         for sid, scfg in (cfg.get("stores") or {}).items():
             scfg = scfg or {}
             if not store_enabled(sid, scfg) or sid not in REGISTRY:
                 continue
             store = REGISTRY[sid](scfg, filt)
+            client = tunneled if sid in via else direct
             try:
                 items = await store.fetch(client)
             except Exception as e:  # noqa: BLE001
                 print(f"\n== {store.name}: ERROR {e}")
                 continue
-            print(f"\n== {store.name}: {len(items)} listings")
+            print(f"\n== {store.name}: {len(items)} listings" + (" (via WARP)" if sid in via else ""))
             for it in sorted(items, key=_sort_key):
                 flag = {True: "IN STOCK ", False: "out      ", None: "unknown  "}[it.in_stock]
                 print(f"  {flag} {_rupees(it.price):>9}  {it.title}\n            {it.url}")
+    if tunnel:
+        tunnel.stop()
 
 
 if __name__ == "__main__":

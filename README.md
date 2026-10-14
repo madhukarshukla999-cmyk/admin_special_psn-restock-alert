@@ -52,7 +52,7 @@ This creates a Task Scheduler task called **PSN Stock Bot**. It runs hidden at l
 ### Heroku (worker dyno + Postgres)
 Heroku wipes the disk on every restart, so the bot saves everything (stock, history, people, settings) to **Heroku Postgres** whenever `DATABASE_URL` is set. On a PC it keeps using `data/state.json`.
 1. Create an app, then **Resources → Add-ons → Heroku Postgres (Essential-0)**. This sets `DATABASE_URL`.
-2. **Settings → Config Vars:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and optionally the `SMTP_*` settings. **Blinkit** blocks cloud IPs, so set **`BLINKIT_WARP=1`**. This routes only Blinkit through a free Cloudflare WARP tunnel, which Blinkit accepts. (Alternatively, `BLINKIT_PROXY=http://user:pass@host:port` for your own proxy.) Check with **More → Run console** → `python -m psnbot --test-blinkit`.
+2. **Settings → Config Vars:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and optionally the `SMTP_*` settings. **Blinkit** blocks cloud IPs, so set **`BLINKIT_WARP=1`**. This routes Blinkit and GyFTR (both block Heroku) through a free Cloudflare WARP tunnel. Use `WARP_STORES=blinkit,gyftr,amazon` to choose which stores use it. (Alternatively, `BLINKIT_PROXY=http://user:pass@host:port` for your own proxy.) Check with **More → Run console** → `python -m psnbot --test-blinkit`.
 3. **Deploy → GitHub:** connect this repo, enable **Automatic deploys** from `main`, then click **Deploy Branch**.
 4. **Resources:** turn the **worker** dyno on (the `Procfile` has no web process).
 5. Optional: copy your PC's data into the database. Stop the PC bot, then run on the PC: `set DATABASE_URL=<value from Config Vars>` and `.venv\Scripts\python -m psnbot --import-state data\state.json`.

@@ -30,11 +30,20 @@ WGCF = ("https://github.com/ViRb3/wgcf/releases/download/v2.3.1/wgcf_2.3.1_linux
 WIREPROXY = ("https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_linux_amd64.tar.gz",
              "e88c1d090740373fc606c1bafd81d9a5eadc642cce5667616e20e9d7a444f51c")
 PORT = 40000
-PROXY_URL = f"socks5h://127.0.0.1:{PORT}"
+PROXY_URL = f"socks5h://127.0.0.1:{PORT}"      # for curl_cffi (Blinkit)
+HTTPX_PROXY = f"socks5://127.0.0.1:{PORT}"     # for httpx (all other stores)
+DEFAULT_STORES = "blinkit,gyftr"               # both block cloud/Heroku IPs
 
 
 def enabled() -> bool:
-    return os.environ.get("BLINKIT_WARP", "").strip().lower() in ("1", "true", "yes", "on")
+    return (os.environ.get("BLINKIT_WARP", "").strip().lower() in ("1", "true", "yes", "on")
+            or bool(os.environ.get("WARP_STORES", "").strip()))
+
+
+def stores() -> set[str]:
+    """Stores that go through the tunnel. WARP_STORES=blinkit,gyftr,amazon to change."""
+    raw = os.environ.get("WARP_STORES", "").strip() or DEFAULT_STORES
+    return {x.strip().lower() for x in raw.split(",") if x.strip()}
 
 
 def _download(url: str, sha: str) -> bytes:

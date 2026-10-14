@@ -14,8 +14,9 @@ DEFAULT_HEADERS = {
 }
 
 
-def make_client(timeout: float = 30.0) -> httpx.AsyncClient:
+def make_client(timeout: float = 30.0, proxy: str | None = None) -> httpx.AsyncClient:
     return httpx.AsyncClient(
+        proxy=proxy,
         headers=DEFAULT_HEADERS,
         timeout=httpx.Timeout(timeout),
         follow_redirects=True,

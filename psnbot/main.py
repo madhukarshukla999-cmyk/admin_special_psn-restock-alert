@@ -27,6 +27,7 @@ from .channels import Mailer, html_to_text, send_whatsapp
 from .stores.base import Store
 from .telegram import Telegram
 from .users import Users
+from . import warp as warpmod
 
 log = logging.getLogger("psnbot")
 IST = ZoneInfo("Asia/Kolkata")
@@ -144,6 +145,9 @@ class Bot:
             raise SystemExit("No stores enabled in config")
         self.names = {s.id: s.name for s in self.stores}
         self._locks = {s.id: asyncio.Lock() for s in self.stores}
+        self.warp = None
+        if warpmod.enabled() and "blinkit" in self.names:
+            self.warp = warpmod.Warp(self.state)
         self.controls = Controls(self)
 
     async def broadcast(self, client, text: str, *, store_id: str | None = None, pref: str | None = None,
@@ -513,6 +517,8 @@ class Bot:
                     self._wake.set()
             self.state.settings["last_alive"] = now
             self.state.save()
+            if self.warp:
+                await asyncio.to_thread(self.warp.ensure)
             await _sleep(30, self._stop)
 
     # -- auto-update ---------------------------------------------------------
@@ -586,6 +592,10 @@ class Bot:
                 log.exception("%s stopped unexpectedly", name)
 
         log.info("Version %s", self.version)
+        if self.warp:
+            proxy = await asyncio.to_thread(self.warp.start)
+            if proxy:
+                os.environ["BLINKIT_PROXY"] = proxy
         async with make_client() as client:
             tasks = [guarded(self._scheduler, "Store checks"),
                      guarded(self._heartbeat_loop, "Heartbeat"),
@@ -601,6 +611,8 @@ class Bot:
             await asyncio.gather(*running, return_exceptions=True)
             self.state.settings["last_alive"] = time.time()
             self.state.save()
+        if self.warp:
+            self.warp.stop()
         log.info("Stopped.")
 
 
@@ -707,8 +719,16 @@ async def _test_blinkit(cfg: dict) -> None:
     scfg = dict((cfg.get("stores") or {}).get("blinkit") or {}, save_raw=True)
     b = Blinkit(scfg, TitleFilter(cfg.get("title_filter", {})))
     print(f"Location: pincode {scfg.get('pincode')}  lat={scfg.get('lat')} lon={scfg.get('lon')}")
-    from curl_cffi.requests import AsyncSession
-    async with AsyncSession(impersonate="chrome") as s:
+    from .stores.blinkit import proxy_url, session
+    tunnel = None
+    if warpmod.enabled():
+        tunnel = warpmod.Warp(State(cfg.get("state_file", "data/state.json")))
+        p = await asyncio.to_thread(tunnel.start)
+        print("WARP tunnel:", "up" if p else f"FAILED ({tunnel.error})")
+        if p:
+            os.environ["BLINKIT_PROXY"] = p
+    print("Proxy:", "yes" if proxy_url() else "none")
+    async with session() as s:
         for prid in b._prids():
             r = await s.post(f"https://blinkit.com/v1/layout/product/{prid}", headers=b._headers(prid), timeout=30)
             print(f"\nProduct {prid}: HTTP {r.status_code}, {len(r.text)} bytes")
@@ -730,6 +750,8 @@ async def _test_blinkit(cfg: dict) -> None:
             print(f"  signals: {info['signals'] or 'none'}")
             print("  RESULT:", {True: "✅ IN STOCK", False: "🔴 OUT OF STOCK", None: "❓ UNKNOWN"}[stock])
             print(f"  Raw response saved to data/blinkit_{prid}.json — send it to me if anything looks wrong.")
+    if tunnel:
+        tunnel.stop()
 
 
 async def _list(cfg: dict) -> None:

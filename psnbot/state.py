@@ -14,7 +14,7 @@ class State:
         data = {}
         if self.path.exists():
             try:
-                data = json.loads(self.path.read_text())
+                data = json.loads(self.path.read_text(encoding="utf-8"))
             except (ValueError, OSError):
                 data = {}
         # True once the first full check has recorded stock (older files: having items counts).
@@ -33,7 +33,7 @@ class State:
             indent=1, ensure_ascii=False,
         )
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".state-")
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:   # utf-8: Windows default can't write ₹
             f.write(payload)
         os.replace(tmp, self.path)   # atomic write
 

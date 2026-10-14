@@ -52,7 +52,7 @@ This creates a Task Scheduler task called **PSN Stock Bot**. It runs hidden at l
 ### Heroku (worker dyno + Postgres)
 Heroku wipes the disk on every restart, so the bot saves everything (stock, history, people, settings) to **Heroku Postgres** whenever `DATABASE_URL` is set. On a PC it keeps using `data/state.json`.
 1. Create an app, then **Resources → Add-ons → Heroku Postgres (Essential-0)**. This sets `DATABASE_URL`.
-2. **Settings → Config Vars:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DISABLE_STORES=blinkit` (Blinkit blocks cloud IPs), and optionally the `SMTP_*` settings.
+2. **Settings → Config Vars:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and optionally the `SMTP_*` settings. **Blinkit** blocks cloud IPs, so either set `BLINKIT_PROXY=http://user:pass@host:port` (an Indian residential proxy; only Blinkit uses it) or `DISABLE_STORES=blinkit`. Check with `heroku run python -m psnbot --test-blinkit`.
 3. **Deploy → GitHub:** connect this repo, enable **Automatic deploys** from `main`, then click **Deploy Branch**.
 4. **Resources:** turn the **worker** dyno on (the `Procfile` has no web process).
 5. Optional: copy your PC's data into the database. Stop the PC bot, then run on the PC: `set DATABASE_URL=<value from Config Vars>` and `.venv\Scripts\python -m psnbot --import-state data\state.json`.

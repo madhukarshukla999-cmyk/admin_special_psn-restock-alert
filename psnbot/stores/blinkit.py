@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from pathlib import Path
@@ -89,6 +90,17 @@ def read_stock(data: dict, prid: str) -> tuple[bool | None, dict]:
     return None, info   # nothing found or conflicting -> unknown (never alerts)
 
 
+def proxy_url() -> str | None:
+    """Blinkit blocks cloud IPs, so on Heroku route it through a residential proxy:
+    BLINKIT_PROXY=http://user:pass@host:port (only Blinkit uses it)."""
+    return os.environ.get("BLINKIT_PROXY") or None
+
+
+def session():
+    p = proxy_url()
+    return AsyncSession(impersonate="chrome", **({"proxy": p} if p else {}))
+
+
 class Blinkit(Store):
     """Blinkit product pages (no login needed): product id + delivery location."""
 
@@ -136,7 +148,7 @@ class Blinkit(Store):
         if AsyncSession is None:
             raise StoreError("Blinkit: install curl_cffi (pip install curl_cffi)")
         items, errors = [], []
-        async with AsyncSession(impersonate="chrome") as s:
+        async with session() as s:
             for prid in prids:
                 try:
                     items.append(await self._check_one(s, prid))

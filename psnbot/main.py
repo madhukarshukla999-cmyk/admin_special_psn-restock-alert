@@ -707,8 +707,9 @@ async def _test_blinkit(cfg: dict) -> None:
     scfg = dict((cfg.get("stores") or {}).get("blinkit") or {}, save_raw=True)
     b = Blinkit(scfg, TitleFilter(cfg.get("title_filter", {})))
     print(f"Location: pincode {scfg.get('pincode')}  lat={scfg.get('lat')} lon={scfg.get('lon')}")
-    from curl_cffi.requests import AsyncSession
-    async with AsyncSession(impersonate="chrome") as s:
+    from .stores.blinkit import proxy_url, session
+    print("Proxy:", "yes (BLINKIT_PROXY)" if proxy_url() else "none")
+    async with session() as s:
         for prid in b._prids():
             r = await s.post(f"https://blinkit.com/v1/layout/product/{prid}", headers=b._headers(prid), timeout=30)
             print(f"\nProduct {prid}: HTTP {r.status_code}, {len(r.text)} bytes")

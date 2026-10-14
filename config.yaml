@@ -67,7 +67,7 @@ stores:
   blinkit:
     # Blinkit blocks cloud/data-center IPs (Cloudflare 403) but works from a home connection
     # (tested from the home PC: HTTP 200). On a cloud server, run --test-blinkit first;
-    # if it says BLOCKED there, set BLINKIT_PROXY (residential proxy) or enabled: false.
+    # if it says BLOCKED there, set BLINKIT_WARP=1 (free Cloudflare WARP tunnel).
     enabled: true
     pincode: "271001"            # Gonda, Uttar Pradesh
     lat: 27.1375914              # coordinates for the pincode (Blinkit uses lat/lon, not the pin)

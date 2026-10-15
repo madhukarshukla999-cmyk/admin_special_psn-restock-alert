@@ -434,7 +434,7 @@ class Bot:
         for rec in self.state.items.values():
             if rec.get("in_stock") and rec["store"] not in muted:
                 by_store.setdefault(rec["store"], []).append(rec)
-        lines = [f"🤖 <b>PSN gift card tracker started</b>\n<i>{_now()}</i>",
+        lines = [f"🤖 <b>PSN gift card tracker v{self.version.split()[0]} started</b>\n<i>{_now()}</i>",
                  f"Watching: {', '.join(s.name for s in active)}",
                  "Send /menu to choose stores, /help for all commands.", ""]
         if not by_store:
@@ -647,7 +647,9 @@ def load_config(path: str) -> dict:
 
 
 def main() -> None:
+    from . import __version__
     ap = argparse.ArgumentParser(description="PlayStation gift card stock tracker → Telegram")
+    ap.add_argument("--version", action="version", version=f"psnbot {__version__}")
     ap.add_argument("-c", "--config", default="config.yaml")
     ap.add_argument("--once", action="store_true", help="run a single check and exit")
     ap.add_argument("--dry-run", action="store_true", help="print alerts instead of sending to Telegram")

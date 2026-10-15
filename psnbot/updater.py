@@ -27,6 +27,13 @@ def _git(repo: Path, *args: str, timeout: int = 120) -> subprocess.CompletedProc
 
 
 def current_version(repo: Path) -> str:
+    """'1.0.1', plus the git commit when running from a clone: '1.0.1 (3dd4c6b 14 Oct 2026)'."""
+    from . import __version__
+    git = _git_version(repo)
+    return f"{__version__} ({git})" if git != "unknown" else __version__
+
+
+def _git_version(repo: Path) -> str:
     try:
         r = _git(repo, "log", "-1", "--format=%h %cd", "--date=format:%d %b %Y")
         return r.stdout.strip() or "unknown"

@@ -83,6 +83,13 @@ stores:
     products: [playstation-gift-cards]
     fast_check: true             # also check every fast_interval_seconds (one page request)
 
+  hubble:
+    # https://offers.myhubble.money – PlayStation only shows up while it's in stock,
+    # so the Gaming category is watched for it (one ~26 KB request).
+    enabled: true
+    categories: [GAMING]
+    fast_check: true             # also check every fast_interval_seconds
+
   jiogames:
     # PSN cards appear in store.jiogames.com/collection/playstation when in stock and are
     # hidden completely when sold out. Restocks are daily, so also checked every

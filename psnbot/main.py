@@ -66,6 +66,22 @@ def _fmt_item(it: Item) -> str:
     return "\n".join(lines)
 
 
+def buy_buttons(items: list[Item], store_name: str) -> dict | None:
+    """One-tap buttons under a restock alert. Product links open the store's app on a phone
+    if it's installed; Amazon also gets 'Add to cart' (adds it straight to your cart)."""
+    rows = []
+    for it in items[:20]:                      # Telegram allows up to 100 buttons; keep it tidy
+        if not it.url or not it.url.startswith("http"):
+            continue
+        value = f"₹{it.denomination:,}" if it.denomination else it.title[:30]
+        row = [{"text": f"🛒 Buy {value} on {store_name}", "url": it.url}]
+        if it.store == "amazon" and len(it.item_id) == 10:
+            row.append({"text": "➕ Add to cart",
+                        "url": f"https://www.amazon.in/gp/aws/cart/add.html?ASIN.1={it.item_id}&Quantity.1=1"})
+        rows.append(row)
+    return {"inline_keyboard": rows} if rows else None
+
+
 def store_enabled(sid: str, scfg: dict) -> bool:
     """config.yaml `enabled`, overridable per machine with env vars, e.g. on Heroku
     DISABLE_STORES=blinkit (blocked from cloud IPs) or ENABLE_STORES=gyftr,flipkart."""
@@ -154,11 +170,12 @@ class Bot:
         self.controls = Controls(self)
 
     async def broadcast(self, client, text: str, *, store_id: str | None = None, pref: str | None = None,
-                        admins_only: bool = False, subject: str | None = None) -> None:
+                        admins_only: bool = False, subject: str | None = None,
+                        reply_markup: dict | None = None) -> None:
         """Send to everyone who should get it. With `subject`, also WhatsApp + email (in the background)."""
         ids = self.users.recipients(store_id=store_id, pref=pref, admins_only=admins_only)
         if ids:
-            await self.tg.send(client, text, chat_ids=ids)
+            await self.tg.send(client, text, chat_ids=ids, reply_markup=reply_markup)
         if subject and not admins_only:
             task = asyncio.create_task(self._send_extra(client, text, subject, store_id, pref))
             self._bg.add(task)
@@ -474,10 +491,12 @@ class Bot:
     # ------------------------------------------------------------------
     async def _send_restock(self, client, restocked: dict[str, list[Item]]) -> None:
         for store_name, items in restocked.items():
-            body = "\n\n".join(_fmt_item(i) for i in sorted(items, key=_sort_key))
+            items = sorted(items, key=_sort_key)
+            body = "\n\n".join(_fmt_item(i) for i in items)
             await self.broadcast(client, f"🟢 <b>PlayStation gift card back in stock on {store_name}!</b>\n"
-                                         f"<i>{_now()}</i>\n\n{body}", store_id=items[0].store,
-                                 subject=f"🟢 PlayStation card back in stock on {store_name}")
+                                         f"<i>{_now()}</i>\n\n{body}\n\n👇 Tap to buy", store_id=items[0].store,
+                                 subject=f"🟢 PlayStation card back in stock on {store_name}",
+                                 reply_markup=buy_buttons(items, store_name))
 
     async def _send_sold_out(self, client, sold_out: dict[str, list[tuple[Item, float | None]]]) -> None:
         for store_name, pairs in sold_out.items():

@@ -39,8 +39,8 @@ COMMANDS = [
 ]
 
 
-FULL_PRESETS = [30, 60, 120, 180, 300, 600, 900, 1800]
-FAST_PRESETS = [0, 20, 30, 45, 60, 120]
+FULL_PRESETS = [15, 30, 60, 120, 180, 300, 600, 1800]
+FAST_PRESETS = [0, 10, 15, 20, 30, 60]
 RISKY = {"amazon", "flipkart", "blinkit"}      # may block very frequent checks
 
 
@@ -132,14 +132,25 @@ class Controls:
         b = self.bot
         lines = ["⏱ <b>How often each store is checked</b>", ""]
         for s in b.stores:
-            full, fast = b.intervals(s)
+            full, fast = b.base_intervals(s)
             dfull, dfast = b.default_intervals(s)
             extra = f" · priority cards every <b>{fmt_secs(fast)}</b>" if b.has_fast(s) else ""
             changed = " ✏️" if (full, fast) != (dfull, dfast) else ""
             lines.append(f"• <b>{html.escape(s.name)}</b>: every <b>{fmt_secs(full)}</b>{extra}{changed}")
+            act = b.burst_active(s)
+            if act:
+                lines.append(f"    ⚡ <b>burst now</b> until {act[1] // 60:02d}:{act[1] % 60:02d} IST: every "
+                             f"<b>{fmt_secs(b.burst_seconds(s))}</b> ({act[2]})")
+            else:
+                ws = b.burst_windows(s)
+                if ws:
+                    lines.append("    ⚡ burst " + ", ".join(f"{a // 60:02d}:{a % 60:02d}–{z // 60:02d}:{z % 60:02d}"
+                                                          for a, z, _ in ws) + " IST")
         if not self.users.is_admin(cid):
             return "\n".join(lines), None
-        lines += ["", "Tap a store to change it. ✏️ = changed from the default.",
+        lines += ["", "⚡ Burst = much faster checks around each store's usual restock time "
+                  "(learned from /besttime, or set in config.yaml).",
+                  "", "Tap a store to change it. ✏️ = changed from the default.",
                   "<i>Or type e.g. /cycle amazon 2m, /cycle amazon fast 30s, /cycle amazon default</i>"]
         btns = [{"text": f"⏱ {s.name}", "callback_data": f"cy:{s.id}"} for s in b.stores]
         rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
@@ -433,14 +444,14 @@ class Controls:
         if fast:
             if not self.bot.has_fast(store):
                 return f"{store.name} has no priority cards; change its full check instead."
-            if sec and sec < 15:
-                return "Priority checks can't be faster than 15 s."
+            if sec and sec < 10:
+                return "Priority checks can't be faster than 10 s."
             self.bot.set_interval(store.id, "fast", sec)
             msg = (f"⚡ {store.name}: priority cards every {fmt_secs(sec)}." if sec else
                    f"⚡ {store.name}: priority checks off (its cards are still checked with the full check).")
         else:
-            if sec < 20:
-                return "Full checks can't be faster than 20 s."
+            if sec < 15:
+                return "Full checks can't be faster than 15 s."
             self.bot.set_interval(store.id, "full", sec)
             msg = f"⏱ {store.name}: full check every {fmt_secs(sec)}."
         if store.id in RISKY and ((not fast and sec < 60) or (fast and sec and sec < 30)):

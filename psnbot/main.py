@@ -126,6 +126,7 @@ class Bot:
         self._check_requesters: list[str] = []
         self._updating = False
         self._resched: dict[str, asyncio.Event] = {}
+        self._burst_cache: dict[str, tuple] = {}
         self._bg: set[asyncio.Task] = set()
         self.mailer = Mailer()
 
@@ -197,17 +198,73 @@ class Bot:
 
     def default_intervals(self, store) -> tuple[int, int | None]:
         full = int(store.cfg.get("interval_seconds") or self.interval)
-        fast = self.fast_interval if (self.has_fast(store) and self.fast_interval > 0) else None
+        fi = int(store.cfg.get("fast_interval_seconds") or self.fast_interval)
+        fast = fi if (self.has_fast(store) and fi > 0) else None
         return full, fast
 
-    def intervals(self, store) -> tuple[int, int | None]:
-        """(full check seconds, priority check seconds or None). /cycles overrides the config."""
+    def base_intervals(self, store) -> tuple[int, int | None]:
+        """Config defaults with /cycles overrides, without burst mode."""
         full, fast = self.default_intervals(store)
         ov = self.state.settings.get("intervals", {}).get(store.id, {})
         full = int(ov.get("full", full))
         if "fast" in ov and self.has_fast(store):
             fast = int(ov["fast"]) or None
         return full, fast
+
+    def intervals(self, store) -> tuple[int, int | None]:
+        """(full check seconds, priority check seconds or None), sped up during burst windows."""
+        full, fast = self.base_intervals(store)
+        b = self.burst_seconds(store)
+        if b:
+            if fast:
+                fast = min(fast, b)
+            else:
+                full = min(full, b)
+        return full, fast
+
+    # -- burst mode: check much faster around each store's usual restock time ---------------
+    def _burst_cfg(self) -> dict:
+        return self.cfg.get("burst") or {}
+
+    def burst_windows(self, store) -> list[tuple[int, int, str]]:
+        """[(from_minute, to_minute, source)] in IST minutes of the day, margin included."""
+        bc = self._burst_cfg()
+        if not bc.get("enabled", True):
+            return []
+        margin = int(bc.get("margin_minutes", 15))
+        out = []
+        for w in (bc.get("windows") or {}).get(store.id, []) or []:     # manual, e.g. "12:00-13:30"
+            try:
+                a, b = (int(x.split(":")[0]) * 60 + int(x.split(":")[1]) for x in str(w).split("-"))
+                out.append((a, b, "set by you"))
+            except ValueError:
+                log.warning("burst window %r for %s isn't HH:MM-HH:MM", w, store.id)
+        if bc.get("learn", True):
+            now = time.time()
+            cache = self._burst_cache.get(store.id)
+            if not cache or now - cache[0] > 600:
+                evs = [e for e in hist.recent(self.state.history, 30 * 86400) if e["store"] == store.id]
+                w = hist.best_window(evs)
+                cache = (now, w)
+                self._burst_cache[store.id] = cache
+            if cache[1]:
+                out.append((cache[1]["from"] - margin, cache[1]["to"] + margin, "learned from history"))
+        return [(a % 1440, b % 1440, src) for a, b, src in out]
+
+    def burst_active(self, store) -> tuple[int, int, str] | None:
+        now = datetime.now(IST)
+        m = now.hour * 60 + now.minute
+        for a, b, src in self.burst_windows(store):
+            if (a <= m < b) if a <= b else (m >= a or m < b):
+                return a, b, src
+        return None
+
+    def burst_seconds(self, store) -> int | None:
+        if not self.burst_active(store):
+            return None
+        bc = self._burst_cfg()
+        risky = store.id in ("amazon", "flipkart", "blinkit")
+        return int(bc.get("risky_seconds", 20) if risky else bc.get("seconds", 10))
 
     def set_interval(self, store_id: str, kind: str, seconds: int | None) -> None:
         """kind 'full' or 'fast'; seconds None = back to default, 0 (fast) = off."""
@@ -287,32 +344,39 @@ class Bot:
             j = min(jitter_cap, sec // 10)
             return sec + random.randint(-j, j) if j else sec
 
-        full, fast = self.intervals(store)
-        now = time.time()
-        next_full = now + spread(full)          # the startup check just did a full check
-        next_fast = now + fast if fast else None
+        # Times of the last checks; the next ones are worked out fresh every round, so burst
+        # windows and /cycles changes take effect straight away.
+        last_full = last_fast = time.time()     # the startup check just did a full check
+        full_gap = spread(self.intervals(store)[0])
+        was_burst = False
         while not stop.is_set():
+            full, fast = self.intervals(store)
+            burst = self.burst_active(store) is not None
+            if burst != was_burst:
+                log.info("%s: burst mode %s (full %ss, priority %ss)", store.name,
+                         "ON" if burst else "off", full, fast or "-")
+                was_burst = burst
+                full_gap = spread(full)
+            full_gap = min(full_gap, full + full // 10)
             now = time.time()
             try:
-                if now >= next_full:
+                if now >= last_full + full_gap:
                     await self.run_store(client, store)
-                    full, fast = self.intervals(store)
-                    next_full = time.time() + spread(full)
-                    next_fast = time.time() + fast if fast else None   # a full check covers them too
-                elif next_fast and now >= next_fast:
+                    last_full = last_fast = time.time()   # a full check covers priority cards too
+                    full_gap = spread(full)
+                elif fast and now >= last_fast + fast:
                     await self.run_store(client, store, fast=True)
-                    next_fast = time.time() + fast
+                    last_fast = time.time()
             except Exception:  # noqa: BLE001
                 log.exception("%s check crashed; will retry", store.name)
-                next_full = max(next_full, time.time() + 30)
-            wake_at = min(next_full, next_fast or float("inf"))
-            await _sleep(wake_at - time.time(), stop, ev)
+                last_full = last_fast = time.time() - full_gap + 30
+            full, fast = self.intervals(store)
+            wake_at = min(last_full + full_gap, last_fast + fast if fast else float("inf"))
+            # wake at least once a minute so a burst window starting is noticed
+            await _sleep(min(wake_at - time.time(), 60), stop, ev)
             if ev.is_set():                     # /cycles changed this store
                 ev.clear()
-                full, fast = self.intervals(store)
-                now = time.time()
-                next_full = min(next_full, now + full)
-                next_fast = min(next_fast or float("inf"), now + fast) if fast else None
+                full_gap = min(full_gap, spread(self.intervals(store)[0]))
 
     async def _scheduler(self, client) -> None:
         try:

@@ -1,9 +1,19 @@
 # PSN gift card tracker configuration
 # Secrets (Telegram token / chat id) go in .env, not here.
 
-interval_seconds: 180          # how often to check all stores (3 min)
-interval_jitter_seconds: 30    # random +/- so requests don't look robotic
-fast_interval_seconds: 60      # extra checks for priority listings (amazon.fast_check); 0 = off
+interval_seconds: 60           # full check of each store (stores can override below; /cycles to change live)
+interval_jitter_seconds: 10    # random +/- so requests don't look robotic
+fast_interval_seconds: 20      # priority checks (fast_check stores); 0 = off
+
+# Burst mode: check much faster around each store's usual restock time.
+# Windows are learned from history (/besttime, needs 3+ restocks on 2+ days) and/or set here.
+burst:
+  enabled: true
+  seconds: 10                  # check interval during a burst
+  risky_seconds: 20            # Amazon / Flipkart / Blinkit (they may block very fast checks)
+  margin_minutes: 15           # start this much before / end after the learned window
+  learn: true
+  windows: {}                  # e.g. {amazon: ["12:00-13:30"], jiogames: ["10:45-11:30"]}  (IST)
 store_timeout_seconds: 120     # give up on a store after this long in one cycle
 error_alert_after_failures: 5  # Telegram warning if a store fails this many times in a row
 notify_out_of_stock: true      # sold-out alerts ("was in stock for 6 min"); each person can turn them off in /menu
@@ -52,6 +62,8 @@ stores:
     max_pages: 1
 
   amazon:
+    interval_seconds: 120        # all Amazon listings; Amazon may block very frequent checks
+    fast_interval_seconds: 30    # the fast_check card(s)
     # Amazon search is blocked from cloud servers, so the bot checks the listings below
     # (via Amazon's mobile product page, which isn't blocked). Paste any Amazon link:
     # full URL, amzn.in share link, or just the 10-character product ID.
@@ -76,6 +88,8 @@ stores:
       # One page lists every value (₹1000–5000) as "pills"; all of them are tracked.
       - https://blinkit.com/prn/sony-playstation-instant-voucher/prid/698590
     fast_check: true             # also check every fast_interval_seconds
+    interval_seconds: 120
+    fast_interval_seconds: 30    # via WARP; Blinkit may block very frequent checks
 
   rooter:
     # https://shop.rooter.gg/product/playstation-gift-cards (Rs.1000–5000 wallet codes)

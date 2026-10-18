@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "PSN Stock Bot \u2013 fast checkout",
-  "version": "1.4.1",
+  "name": "PSN Stock Bot – fast checkout",
+  "version": "1.5.0",
   "description": "Opens PlayStation gift card restocks from your Telegram bot instantly and takes you to checkout. You always pay yourself.",
   "permissions": [
     "storage",
@@ -14,7 +14,8 @@
     "https://www.gamestheshop.com/*",
     "https://www.amazon.in/*",
     "https://secure.paytmpayments.com/*",
-    "https://securegw.paytm.in/*"
+    "https://securegw.paytm.in/*",
+    "https://*.amazon.in/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -30,13 +31,15 @@
         "https://www.gamestheshop.com/*",
         "https://www.amazon.in/*",
         "https://secure.paytmpayments.com/*",
-        "https://securegw.paytm.in/*"
+        "https://securegw.paytm.in/*",
+        "https://*.amazon.in/*"
       ],
       "js": [
         "content.js"
       ],
       "run_at": "document_idle",
-      "all_frames": true
+      "all_frames": true,
+      "match_origin_as_fallback": true
     }
   ],
   "icons": {

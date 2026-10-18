@@ -146,6 +146,66 @@ function highlightQr() {
   return !!qr;
 }
 
+// A click like a real mouse: some pages only react to pointer/mouse down+up, not a bare click().
+function realClick(el) {
+  if (!el) return;
+  try { el.scrollIntoView({ block: "center" }); } catch { /* ignore */ }
+  const r = el.getBoundingClientRect();
+  const o = { bubbles: true, cancelable: true, composed: true, view: window, button: 0,
+              clientX: r.left + Math.min(10, r.width / 2), clientY: r.top + r.height / 2 };
+  for (const t of ["pointerover", "pointerdown", "mousedown", "pointerup", "mouseup"])
+    el.dispatchEvent(t.startsWith("pointer") ? new PointerEvent(t, { ...o, pointerType: "mouse", isPrimary: true }) : new MouseEvent(t, o));
+  el.click();
+}
+
+// Selects "Scan and Pay with UPI" in this document and returns the enabled
+// "Use this payment method" button (or null). Used by the top page and by iframes.
+async function amzChooseUpi() {
+  const ready = () => {
+    const r = amzUpiQrOption();
+    return (!r || r.type !== "radio" || r.checked) && amzUseThisPayment();
+  };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = amzUpiQrOption(), t = textEl(/^scan and pay with/i);
+    if (!r && !t) return null;
+    // radio first; then the row / label / text, in case Amazon listens on those
+    const targets = attempt === 0 ? [r]
+      : [t && t.closest("label, [role=radio], [data-pmts-component-id], .a-radio, li") , t, r];
+    for (const el of targets) {
+      if (!el || (r && r.type === "radio" && r.checked)) break;
+      realClick(el);
+      await sleep(150);
+    }
+    const use = await find(ready, attempt === 0 ? 2500 : 3500);
+    if (use) return use;
+  }
+  return null;
+}
+
+// iframes tell the top page what they did (cross-origin safe: window.postMessage)
+const frameState = { chosen: false, pressed: false };
+window.addEventListener("message", (e) => {
+  let okOrigin = false;
+  try { okOrigin = /(^|\.)amazon\.in$/.test(new URL(e.origin).hostname); } catch { /* ignore */ }
+  if (!okOrigin || !e.data || e.data.psnbot !== 1) return;
+  if (e.data.chosen) frameState.chosen = true;
+  if (e.data.pressed) frameState.pressed = true;
+});
+
+// Runs in Amazon iframes during checkout: only picks "Scan and Pay with UPI" (never pays).
+async function amazonFrame(job) {
+  if (job.step === "paid") return;
+  const o = await chrome.storage.local.get({ amazonUpiQr: true });
+  if (!o.amazonUpiQr) return;
+  const found = await find(() => amzUpiQrOption() || textEl(/^scan and pay with/i), 25000);
+  if (!found) return;
+  const use = await amzChooseUpi();
+  const r = amzUpiQrOption();
+  if (!use && r && r.type === "radio" && !r.checked) return;     // couldn't select it
+  window.top.postMessage({ psnbot: 1, chosen: true }, "*");
+  if (use) { realClick(use); window.top.postMessage({ psnbot: 1, pressed: true }, "*"); }
+}
+
 async function amazonCheckout(job) {
   const o = await chrome.storage.local.get({ amazonUpiQr: true });
   const manual = "Amazon: checkout open – pick how to pay and finish it yourself.";
@@ -161,50 +221,40 @@ async function amazonCheckout(job) {
   const what = await find(() => {
     if (amzPayWithUpi() && amzQrChosen()) return "pay";
     if (amzUpiQrOption()) return "choose";
+    if (frameState.chosen) return "frame";
     if (job.step !== "changepay" && amzChangePayment() && textEl(/^(place your order|pay with|pay now)/i)) return "change";
     return null;
-  }, 20000);
-
-
+  }, 25000);
 
   if (what === "pay") {
     await step("paid", "Amazon: review page – clicking 'Pay with UPI'…");
-    amzPayWithUpi().click();       // order waits for your UPI payment; nothing is paid until you scan + PIN
+    realClick(amzPayWithUpi());    // order waits for your UPI payment; nothing is paid until you scan + PIN
     if (await find(() => !amzPayWithUpi() && highlightQr(), 15000))      // QR shown on the same page
       return step("qr", "Amazon: QR is ready – scan it with your UPI app and enter your PIN.", true);
     return;
   }
+  if (what === "frame") {
+    // the list is in an iframe; that frame's copy of this script picked UPI. Press the button
+    // here (top-right "Use this payment method") unless the frame already pressed its own.
+    await step("chosen", "Amazon: UPI QR chosen – clicking 'Use this payment method'…");
+    await sleep(400);
+    if (!frameState.pressed && !moved()) { const use = amzUseThisPayment(); if (use) realClick(use); }
+    if (await find(() => amzPayWithUpi() && amzQrChosen(), 15000)) return amazonCheckout({ ...job, step: "chosen" });
+    return;
+  }
   if (what === "choose") {
     await step("choosing", "Amazon: payment page – choosing 'Scan and Pay with UPI'…");
-    // Amazon hides the real radio and listens on the row, so click the radio, its label and the text
-    const pick = () => {
-      const r = amzUpiQrOption(), t = textEl(/^scan and pay with/i);
-      const targets = new Set([r, r && r.closest && r.closest("label, [role=radio]"), t, t && t.closest("label, [role=radio]")]);
-      for (const el of targets) if (el && !(r && r.type === "radio" && r.checked)) el.click();
-    };
-    pick();
-    // wait for the radio to be on and "Use this payment method" to turn yellow; click again once if not
-    let use = await find(() => {
-      const r = amzUpiQrOption();
-      return (!r || r.type !== "radio" || r.checked) && amzUseThisPayment();
-    }, 3000);
-    if (!use) {
-      pick();
-      use = await find(() => {
-        const r = amzUpiQrOption();
-        return (!r || r.type !== "radio" || r.checked) && amzUseThisPayment();
-      }, 5000);
-    }
-    if (!use) return step("checkout", "Amazon: picked 'Scan and Pay with UPI' – tap 'Use this payment method'. " + amzDiag(), true);
+    const use = await amzChooseUpi();
+    if (!use) return step("checkout", "Amazon: couldn't select 'Scan and Pay with UPI' – tap it, then 'Use this payment method'. " + amzDiag(), true);
     await step("chosen", "Amazon: UPI QR chosen – clicking 'Use this payment method'…");
-    use.click();
+    realClick(use);
     // review page: usually a new URL (handled by the main loop); if it updates in place, go on here
     if (await find(() => amzPayWithUpi() && amzQrChosen(), 15000)) return amazonCheckout({ ...job, step: "chosen" });
     return;
   }
   if (what === "change") {
     await step("changepay", "Amazon: review page has another payment method – clicking 'Change'…");
-    amzChangePayment().click();
+    realClick(amzChangePayment());
     if (await find(amzUpiQrOption, 10000)) return amazonCheckout({ ...job, step: "changepay" });
     return;
   }
@@ -307,7 +357,12 @@ async function getJob() {
 (async () => {
   const host = location.hostname;
   const isPaytm = host.endsWith("paytmpayments.com") || host.endsWith("paytm.in");
-  if (window !== window.top && !isPaytm) return;    // store pages: top frame only (no double clicks)
+  const isAmazon = host === "amazon.in" || host.endsWith(".amazon.in");
+  if (window !== window.top) {
+    // iframes: Paytm runs fully; Amazon's payment-list frame only selects UPI; others do nothing
+    if (!isPaytm && !isAmazon) return;
+    if (isAmazon) { const job = await getJob(); if (job) await amazonFrame(job); return; }
+  } else if (isAmazon && host !== "www.amazon.in") return;
   let job = await getJob();
   if (!job) return;                                  // not a tab we opened: do nothing
   for (;;) {

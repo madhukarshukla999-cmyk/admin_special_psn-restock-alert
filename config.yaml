@@ -39,6 +39,9 @@ stores:
 
   gamestheshop:
     enabled: true
+    # One ~12 KB request with live (uncached) stock, so it's safe to check very often.
+    # PSN cards here are limited to 1 per order and sell out fast.
+    interval_seconds: 10
     # "gift card" returns only ~17 products (all 8 PSN values among them) in a single page,
     # so a card can't drop off the results just because of ranking changes.
     search_queries: [gift card]

@@ -28,6 +28,7 @@ from .stores.base import Store
 from .telegram import Telegram
 from .users import Users
 from . import warp as warpmod
+from . import extension_push
 
 log = logging.getLogger("psnbot")
 IST = ZoneInfo("Asia/Kolkata")
@@ -492,6 +493,11 @@ class Bot:
     async def _send_restock(self, client, restocked: dict[str, list[Item]]) -> None:
         for store_name, items in restocked.items():
             items = sorted(items, key=_sort_key)
+            if self.cfg.get("extension_push", True) and not self.tg.dry_run:
+                # laptop extension first: it's the fastest path to checkout
+                task = asyncio.create_task(extension_push.publish(client, self.state, store_name, items))
+                self._bg.add(task)
+                task.add_done_callback(self._bg.discard)
             body = "\n\n".join(_fmt_item(i) for i in items)
             await self.broadcast(client, f"🟢 <b>PlayStation gift card back in stock on {store_name}!</b>\n"
                                          f"<i>{_now()}</i>\n\n{body}\n\n👇 Tap to buy", store_id=items[0].store,

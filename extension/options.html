@@ -26,6 +26,9 @@
 
 <fieldset><legend>When a card is back</legend>
   <label><input type="checkbox" id="autoClick"> Click through to checkout (GamesTheShop, Amazon)</label>
+  <label><input type="checkbox" id="clickPayNow"> GamesTheShop: also click <b>Pay Now</b> (shows the Paytm QR)</label>
+  <label>Your UPI ID (optional – sends the payment request to your UPI app instead of showing the QR)
+    <input type="text" id="upiId" placeholder="name@okicici"></label>
   <label><input type="checkbox" id="st_gamestheshop"> GamesTheShop</label>
   <label><input type="checkbox" id="st_amazon"> Amazon</label>
   <label><input type="checkbox" id="st_others"> Other stores (just open the page)</label>
@@ -43,7 +46,7 @@
 </fieldset>
 
 <div id="log"></div>
-<p><small>It never places an order or pays – you choose the card and enter the OTP yourself.</small></p>
+<p><small>It never pays: you scan the QR, or approve the UPI request, with your own PIN.</small></p>
 <script src="options.js"></script>
 </body>
 </html>

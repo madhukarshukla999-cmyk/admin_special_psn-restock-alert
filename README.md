@@ -62,7 +62,7 @@ Only run **one** copy per Telegram bot, so stop the PC task (`uninstall-autostar
 
 ### Laptop browser extension (fast checkout)
 The `extension/` folder is a Chrome/Edge extension. When the bot finds a restock, it opens the card on your laptop **within about a second** and goes to checkout. **You always pay yourself**: it never places an order, and stops at the payment/OTP step.
-- **GamesTheShop:** opens the card and clicks **BUY NOW**, so you land on checkout if you're logged in.
+- **GamesTheShop:** opens the card, clicks **BUY NOW**, then **Pay Now**, so Paytm's QR is on screen to scan with your phone. Or set your UPI ID in the options and it sends the request to your UPI app instead; you only enter your PIN.
 - **Amazon:** adds the card to the cart, then clicks **Proceed to Buy**.
 - **Other stores:** just opens the page.
 

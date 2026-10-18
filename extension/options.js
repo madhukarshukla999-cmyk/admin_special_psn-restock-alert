@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const DEFAULTS = { topic: "", enabled: true, autoClick: true, sound: true, maxPrice: 0,
+const DEFAULTS = { topic: "", enabled: true, autoClick: true, sound: true, maxPrice: 0, clickPayNow: true, upiId: "",
                    stores: { gamestheshop: true, amazon: true, others: true } };
 
 async function load() {
@@ -7,6 +7,7 @@ async function load() {
   s.stores = { ...DEFAULTS.stores, ...(s.stores || {}) };
   $("topic").value = s.topic; $("enabled").checked = s.enabled; $("autoClick").checked = s.autoClick;
   $("sound").checked = s.sound; $("maxPrice").value = s.maxPrice || 0;
+  $("clickPayNow").checked = s.clickPayNow; $("upiId").value = s.upiId || "";
   for (const k of ["gamestheshop", "amazon", "others"]) $("st_" + k).checked = s.stores[k];
   const fresh = s.connAt && Date.now() - s.connAt < 5 * 60 * 1000;
   $("status").textContent = !s.topic ? "not set up" : !s.enabled ? "off"
@@ -18,6 +19,7 @@ $("save").onclick = async () => {
   await chrome.storage.local.set({
     topic: $("topic").value.trim(), enabled: $("enabled").checked, autoClick: $("autoClick").checked,
     sound: $("sound").checked, maxPrice: Number($("maxPrice").value) || 0,
+    clickPayNow: $("clickPayNow").checked, upiId: $("upiId").value.trim(),
     stores: { gamestheshop: $("st_gamestheshop").checked, amazon: $("st_amazon").checked, others: $("st_others").checked },
   });
   chrome.runtime.sendMessage({ type: "settings-changed" }).catch(() => {});

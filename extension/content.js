@@ -61,18 +61,50 @@ async function gamestheshop(job) {
                         "To test BUY NOW use /extension test <product link>.", true);
 }
 
+// Amazon: product page → Buy Now (straight to checkout); fallback Add to Cart → Proceed to Buy.
+const visible = (e) => e && !e.disabled && (e.offsetParent !== null || e.getClientRects().length > 0);
+const q = (...sels) => () => sels.map((s) => document.querySelector(s)).find(visible) || null;
+const AMZ_BUY_NOW = q("#buy-now-button", 'input[name="submit.buy-now"]', "#buyNow");
+const AMZ_ADD = q("#add-to-cart-button", 'input[name="submit.add-to-cart"]', "#gc-buy-box-atc");
+const AMZ_PROCEED = () => q('input[name="proceedToRetailCheckout"]', "#sc-buy-box-ptc-button input",
+  "#attach-sidesheet-checkout-button input", "#hlb-ptc-btn-native")() || byText(/^proceed to (buy|checkout)/i)();
+const AMZ_TURBO = q("#turbo-checkout-iframe", "#turbo-checkout-panel-container", "#turbo-checkout-modal");
+
+function amazonUnavailable() {
+  const a = (document.querySelector("#availability, #outOfStock") || {}).innerText || "";
+  return /currently unavailable|out of stock|unavailable/i.test(a);
+}
+
 async function amazon(job) {
   const path = location.pathname;
   if (/\/(checkout|gp\/buy)\//.test(path) || /\/spc\//.test(path))
     return step("checkout", "Amazon: checkout open – pick your card and enter OTP.", true);
   if (/\/ap\/signin/.test(path)) return step("login", "Amazon: please log in in this browser once.", true);
-  if (path.includes("/gp/aws/cart/add")) {
-    const btn = await find(() => document.querySelector('input[name="add"]') || byText(/^(continue|add to cart)$/i)());
-    if (btn) { await step("added"); btn.click(); return; }
+
+  if (/\/(dp|gp\/product|gp\/aw\/d)\//.test(path) && job.step === "start") {
+    const btn = await find(() => AMZ_BUY_NOW() || AMZ_ADD() || (amazonUnavailable() && "na"), 12000);
+    if (!btn || btn === "na")
+      return step("none", `Amazon: ${btn ? "this card is currently unavailable (sold out)" : "no Buy Now / Add to Cart button"} – check the tab.`, true);
+    const buyNow = btn === AMZ_BUY_NOW();
+    await step(buyNow ? "buynow" : "added");
+    btn.click();
+    if (buyNow) {
+      // Buy Now either goes to checkout (new page) or opens Amazon's quick-checkout box on this page
+      const turbo = await find(AMZ_TURBO, 8000);
+      if (turbo) return step("checkout", "Amazon: quick checkout open – check it and place the order yourself.", true);
+      return;
+    }
+    // Add to Cart may show a side panel on the same page with "Proceed to checkout"
+    const go = await find(AMZ_PROCEED, 8000);
+    if (go) { await step("proceed"); go.click(); }
+    return;
   }
+
   if (/\/(gp\/cart|cart)/.test(path) || job.step === "added") {
-    const btn = await find(() => document.querySelector('input[name="proceedToRetailCheckout"]') ||
-                                 byText(/proceed to (buy|checkout)/i)(), 10000);
+    const btn = await find(() => AMZ_PROCEED() ||
+      (/your amazon cart is empty/i.test(document.body.innerText) && "empty"), 10000);
+    if (btn === "empty")
+      return step("none", "Amazon: the cart is empty – the card sold out before it could be added.", true);
     if (btn) { await step("proceed"); btn.click(); return; }
     return step("none", "Amazon: couldn't find 'Proceed to Buy' – finish in the tab.", true);
   }

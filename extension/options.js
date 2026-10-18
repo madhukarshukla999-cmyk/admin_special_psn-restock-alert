@@ -30,9 +30,7 @@ $("save").onclick = async () => {
 $("test").onclick = () => {
   const url = $("testUrl").value.trim() || "https://www.gamestheshop.com/";
   const store = url.includes("amazon.in") ? "amazon" : url.includes("gamestheshop.com") ? "gamestheshop" : "test";
-  const asin = (url.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/) || [])[1];
-  chrome.runtime.sendMessage({ type: "test", url, store,
-    cart_url: asin ? `https://www.amazon.in/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=1` : null });
+  chrome.runtime.sendMessage({ type: "test", url, store });
 };
 
 chrome.storage.onChanged.addListener(load);

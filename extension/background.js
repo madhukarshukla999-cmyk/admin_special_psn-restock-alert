@@ -96,7 +96,9 @@ async function handleAlert(data) {
 
   const it = items[items.length - 1];        // highest value first is usually what people want
   const clickThrough = s.autoClick && auto;
-  const url = (clickThrough && it.cart_url && safeUrl(it.cart_url)) || safeUrl(it.url);
+  // Always the product page: Amazon's cart-add link (cart_url) often lands on an empty cart,
+  // so the content script presses Buy Now on the product page instead.
+  const url = safeUrl(it.url);
 
   const win = await chrome.windows.getLastFocused().catch(() => null);
   const tab = await chrome.tabs.create({ url, active: true, ...(win ? { windowId: win.id } : {}) });

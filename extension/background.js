@@ -127,13 +127,14 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     chrome.storage.session.get("jobs").then(async ({ jobs = {} }) => {
       if (msg.done) delete jobs[sender.tab.id]; else if (jobs[sender.tab.id]) jobs[sender.tab.id].step = msg.step;
       await chrome.storage.session.set({ jobs });
+      reply(true);                         // the content script waits for this before clicking
       if (msg.note) {
         await log(msg.note);
         if (msg.done) chrome.notifications.create({ type: "basic", iconUrl: "icon.png", priority: 2,
           title: "PSN Stock Bot", message: msg.note });
       }
     });
-    return;
+    return true;
   }
   if (msg.type === "settings-changed") { ensureListener(); return; }
   if (msg.type === "test") { handleAlert({ test: true, ts: Date.now() / 1000, store: msg.store, store_name: "Test",

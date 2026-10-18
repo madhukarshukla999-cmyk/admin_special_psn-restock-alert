@@ -4,9 +4,14 @@
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// GamesTheShop is a Next.js app: BUY NOW / Pay Now change the URL without a page load, so this
+// script isn't re-injected. We watch the URL ourselves and stop any wait once the page moved on.
+let href = location.href;
+const moved = () => location.href !== href;
+
 async function find(test, timeoutMs = 15000) {
   const end = Date.now() + timeoutMs;
-  while (Date.now() < end) {
+  while (Date.now() < end && !moved()) {
     const el = test();
     if (el) return el;
     await sleep(250);
@@ -20,7 +25,9 @@ const byText = (re, sel = "button, input[type=submit], a") => () =>
     return re.test(t) && !e.disabled && e.offsetParent !== null;
   });
 
-const step = (s, note, done = false) => chrome.runtime.sendMessage({ type: "job-step", step: s, note, done });
+// (if the page already moved on while we were looking, say nothing: the next page takes over)
+const step = (s, note, done = false) => moved() ? Promise.resolve()
+  : chrome.runtime.sendMessage({ type: "job-step", step: s, note, done }).catch(() => {});
 
 async function opts() {
   return chrome.storage.local.get({ clickPayNow: true, upiId: "" });
@@ -47,7 +54,11 @@ async function gamestheshop(job) {
     }
     await step("clicked");
     btn.click();
+    return;
   }
+  if (job.step === "start")
+    return step("none", "GamesTheShop: opened a page that isn't a product – nothing to click. " +
+                        "To test BUY NOW use /extension test <product link>.", true);
 }
 
 async function amazon(job) {
@@ -116,11 +127,33 @@ async function paytm(job) {
   return step("pay", "Paytm: payment page open – choose how to pay.", true);
 }
 
+async function getJob() {
+  // the background saves the job right after opening the tab; on a fast page we can ask first
+  for (let i = 0; i < 6; i++) {
+    const job = await chrome.runtime.sendMessage({ type: "job?" }).catch(() => null);
+    if (job) return job;
+    await sleep(500);
+  }
+  return null;
+}
+
 (async () => {
-  const job = await chrome.runtime.sendMessage({ type: "job?" });
-  if (!job) return;                                  // not a tab we opened: do nothing
   const host = location.hostname;
-  if (host === "www.gamestheshop.com") await gamestheshop(job);
-  else if (host === "www.amazon.in") await amazon(job);
-  else if (host.endsWith("paytmpayments.com") || host.endsWith("paytm.in")) await paytm(job);
+  const isPaytm = host.endsWith("paytmpayments.com") || host.endsWith("paytm.in");
+  if (window !== window.top && !isPaytm) return;    // store pages: top frame only (no double clicks)
+  let job = await getJob();
+  if (!job) return;                                  // not a tab we opened: do nothing
+  for (;;) {
+    href = location.href;
+    if (host === "www.gamestheshop.com") await gamestheshop(job);
+    else if (host === "www.amazon.in") await amazon(job);
+    else if (isPaytm) await paytm(job);
+    // in-page navigation (Next.js / SPA): wait for the URL to change, then handle the new page
+    const end = Date.now() + 60000;
+    while (!moved() && Date.now() < end) await sleep(200);
+    if (!moved()) return;
+    await sleep(300);                                // let the new page render
+    job = await chrome.runtime.sendMessage({ type: "job?" }).catch(() => null);
+    if (!job) return;                                // finished (or expired)
+  }
 })();

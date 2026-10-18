@@ -106,10 +106,23 @@ function boxText(el) {
     if ((p.innerText || "").trim().length > 25) return p.innerText;
   return "";
 }
+const enabled = (e) => visible(e) && e.getAttribute("aria-disabled") !== "true" &&
+  !(e.closest && e.closest(".a-button-disabled"));
 const amzUseThisPayment = () => {
-  const t = textEl(/^use this payment method$/i);
-  return t && visible(clickable(t)) ? clickable(t) : (t || null);
+  const t = [...document.querySelectorAll("span, button, input[type=submit], a")].filter((e) => visible(e) &&
+    /^use this payment method$/i.test(((e.innerText || e.value || e.getAttribute("aria-label") || "") + "").trim()));
+  return t.map(clickable).find(enabled) || null;     // the grey (disabled) one doesn't count
 };
+
+// one line describing the page, logged when a step fails, so we can see what Amazon changed
+function amzDiag() {
+  const frames = [...document.querySelectorAll("iframe")].filter(visible)
+    .map((f) => { try { return new URL(f.src).hostname + new URL(f.src).pathname.slice(0, 20); } catch { return f.name || "?"; } });
+  const btns = [...document.querySelectorAll("button, input[type=submit], .a-button-text")].filter(visible)
+    .map((b) => (b.innerText || b.value || b.getAttribute("aria-label") || "").trim()).filter(Boolean).slice(0, 8);
+  return `[debug ${location.pathname.slice(0, 40)} | scanText:${/scan and pay/i.test(document.body.innerText)} ` +
+         `radios:${document.querySelectorAll('input[type=radio]').length} frames:${JSON.stringify(frames)} btns:${JSON.stringify(btns)}]`;
+}
 // On the order review page: is the chosen payment the UPI QR, and is the button "Pay with UPI"?
 const amzQrChosen = () => /pay by scanning the qr code|scan and pay with upi/i.test(document.body.innerText);
 const amzPayWithUpi = () => {
@@ -150,35 +163,52 @@ async function amazonCheckout(job) {
     if (amzUpiQrOption()) return "choose";
     if (job.step !== "changepay" && amzChangePayment() && textEl(/^(place your order|pay with|pay now)/i)) return "change";
     return null;
-  }, 15000);
+  }, 20000);
+
+
 
   if (what === "pay") {
-    await step("paid");
+    await step("paid", "Amazon: review page – clicking 'Pay with UPI'…");
     amzPayWithUpi().click();       // order waits for your UPI payment; nothing is paid until you scan + PIN
     if (await find(() => !amzPayWithUpi() && highlightQr(), 15000))      // QR shown on the same page
       return step("qr", "Amazon: QR is ready – scan it with your UPI app and enter your PIN.", true);
     return;
   }
   if (what === "choose") {
-    amzUpiQrOption().click();
-    const use = await find(() => {
+    await step("choosing", "Amazon: payment page – choosing 'Scan and Pay with UPI'…");
+    // Amazon hides the real radio and listens on the row, so click the radio, its label and the text
+    const pick = () => {
+      const r = amzUpiQrOption(), t = textEl(/^scan and pay with/i);
+      const targets = new Set([r, r && r.closest && r.closest("label, [role=radio]"), t, t && t.closest("label, [role=radio]")]);
+      for (const el of targets) if (el && !(r && r.type === "radio" && r.checked)) el.click();
+    };
+    pick();
+    // wait for the radio to be on and "Use this payment method" to turn yellow; click again once if not
+    let use = await find(() => {
       const r = amzUpiQrOption();
       return (!r || r.type !== "radio" || r.checked) && amzUseThisPayment();
-    }, 6000);
-    if (!use) return step("checkout", "Amazon: picked 'Scan and Pay with UPI' – tap 'Use this payment method'.", true);
-    await step("chosen");
+    }, 3000);
+    if (!use) {
+      pick();
+      use = await find(() => {
+        const r = amzUpiQrOption();
+        return (!r || r.type !== "radio" || r.checked) && amzUseThisPayment();
+      }, 5000);
+    }
+    if (!use) return step("checkout", "Amazon: picked 'Scan and Pay with UPI' – tap 'Use this payment method'. " + amzDiag(), true);
+    await step("chosen", "Amazon: UPI QR chosen – clicking 'Use this payment method'…");
     use.click();
     // review page: usually a new URL (handled by the main loop); if it updates in place, go on here
     if (await find(() => amzPayWithUpi() && amzQrChosen(), 15000)) return amazonCheckout({ ...job, step: "chosen" });
     return;
   }
   if (what === "change") {
-    await step("changepay");
+    await step("changepay", "Amazon: review page has another payment method – clicking 'Change'…");
     amzChangePayment().click();
     if (await find(amzUpiQrOption, 10000)) return amazonCheckout({ ...job, step: "changepay" });
     return;
   }
-  return step("checkout", manual, true);
+  return step("checkout", manual + " " + amzDiag(), true);
 }
 
 async function amazon(job) {
@@ -189,14 +219,14 @@ async function amazon(job) {
   if (/\/(dp|gp\/product|gp\/aw\/d)\//.test(path) && job.step === "start") {
     const btn = await find(() => AMZ_BUY_NOW() || AMZ_ADD() || (amazonUnavailable() && "na"), 12000);
     if (!btn || btn === "na")
-      return step("none", `Amazon: ${btn ? "this card is currently unavailable (sold out)" : "no Buy Now / Add to Cart button"} – check the tab.`, true);
+      return step("none", `Amazon: ${btn ? "this card is currently unavailable (sold out)" : "no Buy Now / Add to Cart button " + amzDiag()} – check the tab.`, true);
     const buyNow = btn === AMZ_BUY_NOW();
-    await step(buyNow ? "buynow" : "added");
+    await step(buyNow ? "buynow" : "added", `Amazon: product page – clicking '${buyNow ? "Buy Now" : "Add to Cart"}'…`);
     btn.click();
     if (buyNow) {
       // Buy Now either goes to checkout (new page) or opens Amazon's quick-checkout box on this page
       const turbo = await find(AMZ_TURBO, 8000);
-      if (turbo) return step("checkout", "Amazon: quick checkout open – check it and place the order yourself.", true);
+      if (turbo) return step("checkout", "Amazon: quick checkout pop-up opened instead of the checkout page – finish it yourself. " + amzDiag(), true);
       return;
     }
     // Add to Cart may show a side panel on the same page with "Proceed to checkout"

@@ -36,4 +36,5 @@ $("test").onclick = () => {
 };
 
 chrome.storage.onChanged.addListener(load);
+$("ver").textContent = "v" + chrome.runtime.getManifest().version;
 load();

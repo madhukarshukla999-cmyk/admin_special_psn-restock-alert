@@ -116,11 +116,28 @@ async function paytm(job) {
   return step("pay", "Paytm: payment page open – choose how to pay.", true);
 }
 
-(async () => {
+async function handle() {
   const job = await chrome.runtime.sendMessage({ type: "job?" });
-  if (!job) return;                                  // not a tab we opened: do nothing
+  if (!job) return false;                            // not a tab we opened (or job finished)
   const host = location.hostname;
   if (host === "www.gamestheshop.com") await gamestheshop(job);
   else if (host === "www.amazon.in") await amazon(job);
   else if (host.endsWith("paytmpayments.com") || host.endsWith("paytm.in")) await paytm(job);
+  return true;
+}
+
+// Sites like GamesTheShop are single-page apps: BUY NOW switches to /checkout without
+// reloading, so this script would otherwise never see the checkout page. Watch the URL and
+// run again whenever it changes (for up to 5 minutes, only in tabs we opened).
+(async () => {
+  let last = location.href, busy = false;     // record the URL *before* clicking: BUY NOW changes it
+  if (!(await handle())) return;
+  const until = Date.now() + 5 * 60 * 1000;
+  const timer = setInterval(async () => {
+    if (Date.now() > until) return clearInterval(timer);
+    if (location.href === last || busy) return;
+    last = location.href;
+    busy = true;
+    try { if (!(await handle())) clearInterval(timer); } finally { busy = false; }
+  }, 300);
 })();

@@ -60,6 +60,16 @@ Heroku wipes the disk on every restart, so the bot saves everything (stock, hist
 
 Only run **one** copy per Telegram bot, so stop the PC task (`uninstall-autostart.ps1`). Auto-update is off on Heroku, since automatic deploys update it. Logs: **More → View logs**.
 
+### Laptop browser extension (fast checkout)
+The `extension/` folder is a Chrome/Edge extension. When the bot finds a restock, it opens the card on your laptop **within about a second** and goes to checkout. **You always pay yourself**: it never places an order, and stops at the payment/OTP step.
+- **GamesTheShop:** opens the card and clicks **BUY NOW**, so you land on checkout if you're logged in.
+- **Amazon:** adds the card to the cart, then clicks **Proceed to Buy**.
+- **Other stores:** just opens the page.
+
+Setup: send `/extension` to the bot (owner only) and follow the steps. In short: `chrome://extensions` → Developer mode → **Load unpacked** → pick `extension/`, then paste the connection code into the extension's Options. Use `/extension test <product link>` to check it.
+
+The bot sends restocks to a private, random [ntfy.sh](https://ntfy.sh) topic, and the extension listens there (free, no account). It only opens links on known store sites, and only clicks in tabs it opened itself. Its options include a price limit, per-store switches and an auto-click switch. Turn the push off with `extension_push: false`.
+
 ### Telegram commands
 Tap the bot's **Menu** button, or type a command:
 - `/menu`: your own ✅/🔕 button per store, **🔔 All on / 🔕 All off**, and switches for **sold-out alerts**, the **daily summary**, **WhatsApp** and **email**

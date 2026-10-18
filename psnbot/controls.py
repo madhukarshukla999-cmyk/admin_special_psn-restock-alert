@@ -35,6 +35,7 @@ COMMANDS = [
     {"command": "email", "description": "Get alerts by email too"},
     {"command": "users", "description": "(owner) Who gets alerts"},
     {"command": "update", "description": "(owner) Install the latest version"},
+    {"command": "extension", "description": "(owner) Connect the laptop browser extension"},
     {"command": "help", "description": "How this bot works"},
 ]
 
@@ -342,12 +343,14 @@ class Controls:
         elif cmd == "/users" and admin:
             text, kb = self.users_view()
             await send(text, reply_markup=kb)
+        elif cmd == "/extension" and admin:
+            await send(await self._extension_command(client, args))
         elif cmd == "/update" and admin:
             await send("⬆️ Checking for updates…")
             await self.bot.run_update(client, manual_cid=cid)
         elif cmd == "/help":
             await send(self.HELP)
-        elif cmd in ("/users", "/update"):
+        elif cmd in ("/users", "/update", "/extension"):
             await send("Only the owner can use that.")
 
     async def _on_button(self, client, cq: dict) -> None:
@@ -530,6 +533,27 @@ class Controls:
                   "<code>/email on|off|test|remove</code>\n\n" if ch else "")
         return (f"📧 <b>Email alerts</b>\n{status}"
                 "Send <code>/email you@example.com</code> to get restock and sold-out alerts by email too.")
+
+    async def _extension_command(self, client, args: list[str]) -> str:
+        from . import extension_push as ep
+        from .models import Item
+        if args and args[0].lower() == "test":
+            url = args[1] if len(args) > 1 and args[1].startswith("https://") else "https://www.gamestheshop.com/"
+            store = ("amazon" if "amazon." in url else "gamestheshop" if "gamestheshop" in url
+                     else "flipkart" if "flipkart" in url else "test")
+            ok = await ep.publish(client, self.bot.state, "Test", [Item(store, "TEST", "Test alert", url, True)], test=True)
+            return ("✅ Test sent. Your laptop browser should open the page within a few seconds."
+                    if ok else "❌ Couldn't reach ntfy.sh; check /health later.")
+        return ("💻 <b>Laptop browser extension</b>\n\n"
+                "1. Download the code from GitHub (green <b>Code</b> button → Download ZIP) and unzip it.\n"
+                "2. In Chrome open <code>chrome://extensions</code>, turn on <b>Developer mode</b>, click "
+                "<b>Load unpacked</b> and pick the <code>extension</code> folder.\n"
+                "3. Open the extension's <b>Options</b> and paste this connection code:\n"
+                f"<code>{html.escape(ep.topic(self.bot.state))}</code>\n"
+                "4. Log in to gamestheshop.com and amazon.in in that browser.\n"
+                "5. Send <code>/extension test</code> (or <code>/extension test &lt;product link&gt;</code>) to check it.\n\n"
+                "<i>Keep the code private: anyone with it could see your alerts. "
+                "The extension only ever goes up to the payment page; you pay yourself.</i>")
 
     async def _on_user_button(self, client, cq, cid, data) -> None:
         if not self.users.is_admin(cid):

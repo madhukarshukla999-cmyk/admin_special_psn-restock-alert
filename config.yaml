@@ -25,6 +25,7 @@ state_file: data/state.json
 # Telegram /menu to switch store notifications on/off (saved in state_file).
 # Only one running copy per bot token can use it — set false on a second copy (e.g. a home Blinkit copy).
 telegram_menu: true
+extension_push: true          # send restocks to the laptop browser extension (/extension to set up)
 
 # Which product titles count as "PlayStation gift card"
 title_filter:

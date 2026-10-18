@@ -75,10 +75,115 @@ function amazonUnavailable() {
   return /currently unavailable|out of stock|unavailable/i.test(a);
 }
 
+// Amazon buttons are <span class="a-button"><input type=submit> + <span>text</span></span>:
+// find the visible text, then click the real input/button of that a-button.
+function clickable(el) {
+  const box = el.closest(".a-button, button, a, label, [role=button], [role=radio]");
+  if (box && box.matches(".a-button")) return box.querySelector("input, button") || el;
+  return box || el;
+}
+function textEl(re, sel = "span, a, button, input[type=submit], label, h1, h2, h3, h4, h5, div") {
+  return [...document.querySelectorAll(sel)].filter((e) => visible(e) &&
+    re.test(((e.innerText || e.value || e.getAttribute("aria-label") || "") + "").trim()))
+    .sort((a, b) => (a.innerText || "").length - (b.innerText || "").length)[0] || null;  // innermost
+}
+
+// The UPI QR option on Amazon's payment page ("Scan and Pay with UPI")
+function amzUpiQrOption() {
+  const t = textEl(/^scan and pay with/i);
+  if (!t) return null;
+  // nearest ancestor holding exactly one radio button = this option's row
+  for (let el = t, i = 0; el && i < 8; el = el.parentElement, i++) {
+    const radios = el.querySelectorAll('input[type="radio"]');
+    if (radios.length === 1) return radios[0];
+    if (radios.length > 1) break;
+  }
+  return t;
+}
+// small box around an element (first ancestor with a bit of text), to tell what it belongs to
+function boxText(el) {
+  for (let p = el.parentElement, i = 0; p && i < 6; p = p.parentElement, i++)
+    if ((p.innerText || "").trim().length > 25) return p.innerText;
+  return "";
+}
+const amzUseThisPayment = () => {
+  const t = textEl(/^use this payment method$/i);
+  return t && visible(clickable(t)) ? clickable(t) : (t || null);
+};
+// On the order review page: is the chosen payment the UPI QR, and is the button "Pay with UPI"?
+const amzQrChosen = () => /pay by scanning the qr code|scan and pay with upi/i.test(document.body.innerText);
+const amzPayWithUpi = () => {
+  const t = textEl(/^pay with upi$/i);
+  return t ? clickable(t) : null;
+};
+const amzChangePayment = () => {
+  // the "Change" link in the payment box (the one that mentions paying / payment method)
+  const links = [...document.querySelectorAll("a, span.a-button-text, input[type=submit]")]
+    .filter((e) => visible(e) && /^change$/i.test((e.innerText || e.value || "").trim()));
+  return links.find((l) => { const t = boxText(l); return /pay(ment| by| with|ing with)/i.test(t) && !/deliver/i.test(t); }) || null;
+};
+
+// a square image/canvas of QR size, near text that mentions scanning / QR / UPI
+function highlightQr() {
+  const qr = [...document.querySelectorAll("img, canvas, svg")].find((e) => {
+    const r = e.getBoundingClientRect();
+    return r.width >= 120 && Math.abs(r.width - r.height) < r.width * 0.15 && /scan|qr|upi/i.test(boxText(e));
+  });
+  if (qr) highlight(qr.parentElement || qr);
+  return !!qr;
+}
+
+async function amazonCheckout(job) {
+  const o = await chrome.storage.local.get({ amazonUpiQr: true });
+  const manual = "Amazon: checkout open – pick how to pay and finish it yourself.";
+  if (!o.amazonUpiQr) return step("checkout", manual, true);
+  if (job.step === "paid") {                            // after "Pay with UPI": the QR page
+    const ok = await find(() => highlightQr(), 15000);
+    return step("qr", ok ? "Amazon: QR is ready – scan it with your UPI app and enter your PIN."
+                         : "Amazon: UPI payment page open – scan the QR and enter your PIN.", true);
+  }
+
+  // 1) payment-method page: choose "Scan and Pay with UPI", then "Use this payment method"
+  // 2) review page: press "Pay with UPI" (only then – never "Place your order" for card/COD)
+  const what = await find(() => {
+    if (amzPayWithUpi() && amzQrChosen()) return "pay";
+    if (amzUpiQrOption()) return "choose";
+    if (job.step !== "changepay" && amzChangePayment() && textEl(/^(place your order|pay with|pay now)/i)) return "change";
+    return null;
+  }, 15000);
+
+  if (what === "pay") {
+    await step("paid");
+    amzPayWithUpi().click();       // order waits for your UPI payment; nothing is paid until you scan + PIN
+    if (await find(() => !amzPayWithUpi() && highlightQr(), 15000))      // QR shown on the same page
+      return step("qr", "Amazon: QR is ready – scan it with your UPI app and enter your PIN.", true);
+    return;
+  }
+  if (what === "choose") {
+    amzUpiQrOption().click();
+    const use = await find(() => {
+      const r = amzUpiQrOption();
+      return (!r || r.type !== "radio" || r.checked) && amzUseThisPayment();
+    }, 6000);
+    if (!use) return step("checkout", "Amazon: picked 'Scan and Pay with UPI' – tap 'Use this payment method'.", true);
+    await step("chosen");
+    use.click();
+    // review page: usually a new URL (handled by the main loop); if it updates in place, go on here
+    if (await find(() => amzPayWithUpi() && amzQrChosen(), 15000)) return amazonCheckout({ ...job, step: "chosen" });
+    return;
+  }
+  if (what === "change") {
+    await step("changepay");
+    amzChangePayment().click();
+    if (await find(amzUpiQrOption, 10000)) return amazonCheckout({ ...job, step: "changepay" });
+    return;
+  }
+  return step("checkout", manual, true);
+}
+
 async function amazon(job) {
   const path = location.pathname;
-  if (/\/(checkout|gp\/buy)\//.test(path) || /\/spc\//.test(path))
-    return step("checkout", "Amazon: checkout open – pick your card and enter OTP.", true);
+  if (/\/(checkout|gp\/buy)\//.test(path) || /\/spc\//.test(path)) return amazonCheckout(job);
   if (/\/ap\/signin/.test(path)) return step("login", "Amazon: please log in in this browser once.", true);
 
   if (/\/(dp|gp\/product|gp\/aw\/d)\//.test(path) && job.step === "start") {

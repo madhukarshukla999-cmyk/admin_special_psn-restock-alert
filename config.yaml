@@ -116,3 +116,6 @@ stores:
     collections: [playstation]
     search_queries: [playstation, psn]
     fast_check: true
+    # A card can stay listed after it runs out (Buy Now then says "out of stock"), so each
+    # listed card is double-checked like Buy Now does (guest cart, nothing is ordered).
+    verify_stock: true

@@ -52,7 +52,8 @@ async function connect() {
   const base = s.server.replace(/\/+$/, "").replace(/^http/, "ws");
   const since = lastMsg ? Math.max(lastMsg, Math.floor(Date.now() / 1000) - 120) : "2m";  // catch up after a drop
   ws = new WebSocket(`${base}/${encodeURIComponent(s.topic)}/ws?since=${since}`);
-  ws.onopen = () => { wsOpenedAt = Date.now(); setStatus("connected"); syncControl(s).catch(() => {}); };
+  ws.onopen = () => { wsOpenedAt = Date.now(); setStatus("connected");
+                      syncControl(s).catch(() => {}).then(() => heartbeat(true)).catch(() => {}); };
   ws.onclose = () => { setStatus("reconnecting"); setTimeout(ensureListener, 3000); };
   ws.onerror = () => {};
   ws.onmessage = (e) => {
@@ -338,7 +339,7 @@ async function tickQrs() {
 
 chrome.alarms.onAlarm.addListener((a) => {
   if (/^qr_\d+$/.test(a.name)) expireQr(Number(a.name.slice(3)));
-  else if (a.name === "keepalive") tickQrs();
+  else if (a.name === "keepalive") { tickQrs(); heartbeat(false).catch(() => {}); }
 });
 
 // The payment tab reported the result (content script watches the page text).
@@ -379,6 +380,8 @@ async function syncControl(s) {
 }
 
 async function applyControl(d, live) {
+  const id = await deviceId();
+  if (d.revoke_all || (Array.isArray(d.revoked) && d.revoked.includes(id))) return revokeMe(!!d.revoke_all);
   const st = await chrome.storage.local.get({ remotePaused: false, setupDone: false, ctlTs: 0, qrMode: "dm", tgQr: true });
   const notes = [];
   const paused = !!d.paused;
@@ -399,6 +402,7 @@ async function applyControl(d, live) {
   chrome.notifications.create({ type: "basic", iconUrl: "icon.png", priority: 1, title: "PSN Stock Bot",
     message: notes.join("\n") + (paused && notes[0].startsWith("⏸") ? "\nThis browser won't open or click anything." : "") });
   if (live && st.setupDone) await reportToOwner(notes.join("\n"));
+  heartbeat(true).catch(() => {});
 }
 
 // short status message to the owner's chat, describing this browser
@@ -413,4 +417,42 @@ async function reportToOwner(head) {
                 `v${chrome.runtime.getManifest().version} · ${new Date().toLocaleTimeString()}`].join("\n");
   const j = await tg("sendMessage", { chat_id: s.tgChatId, text }).catch(() => ({ ok: false }));
   return !!j.ok;
+}
+
+// ---- this browser's identity + heartbeat, so the owner can list / revoke browsers in Telegram ----
+async function deviceId() {
+  let { deviceId: id } = await chrome.storage.local.get("deviceId");
+  if (!id) { id = crypto.randomUUID().replace(/-/g, "").slice(0, 16); await chrome.storage.local.set({ deviceId: id }); }
+  return id;
+}
+
+let lastHb = 0;
+async function heartbeat(force) {
+  if (!force && Date.now() - lastHb < 4 * 60 * 1000) return;          // every ~5 min
+  const s = await chrome.storage.local.get({ topic: "", server: "https://ntfy.sh", setupDone: false, enabled: true,
+    browserType: "", profileName: "", accountName: "", gtsMobile: "", gtsAccount: null, remotePaused: false,
+    qrMode: "dm", tgQr: true });
+  if (!s.topic || !s.setupDone) return;
+  lastHb = Date.now();
+  const acc = s.gtsAccount || {};
+  const body = { v: 1, type: "hb", id: await deviceId(), ts: Date.now() / 1000, version: chrome.runtime.getManifest().version,
+    browser: s.browserType, profile: s.profileName, account: s.accountName || acc.name || "",
+    mobile: s.gtsMobile || acc.mobile || "", paused: s.remotePaused || !s.enabled, qr: !s.tgQr ? "off" : s.qrMode };
+  await fetch(`${s.server.replace(/\/+$/, "")}/${encodeURIComponent(s.topic)}-hb`,
+    { method: "POST", body: JSON.stringify(body), headers: { Tags: "psnhb" } });
+}
+
+// Revoked from Telegram: say so, then forget the feed and the bot token, and show the setup screen.
+async function revokeMe(all) {
+  const { setupDone } = await chrome.storage.local.get({ setupDone: false });
+  if (setupDone) await reportToOwner(all ? "🚫 Disconnected (all browsers revoked)" : "🚫 This browser was revoked").catch(() => {});
+  await chrome.storage.local.set({ topic: "", tgToken: "", tgChatId: "", setupDone: false, remotePaused: false,
+    revokedAt: Date.now(), deviceId: crypto.randomUUID().replace(/-/g, "").slice(0, 16) });   // a reconnect is a new browser
+  for (const [tabId] of await allQrs()) await chrome.storage.local.remove(qrKey(tabId));
+  if (ws) { try { ws.close(); } catch { /* ignore */ } }
+  ws = null; wsKey = "";
+  await setStatus("off");
+  await log("🚫 Revoked from Telegram – disconnected. Paste a new setup code to connect again.");
+  chrome.notifications.create({ type: "basic", iconUrl: "icon.png", priority: 2, title: "PSN Stock Bot",
+    message: "This browser was disconnected from Telegram by the owner." });
 }

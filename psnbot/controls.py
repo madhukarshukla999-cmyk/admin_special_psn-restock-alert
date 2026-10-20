@@ -345,7 +345,8 @@ class Controls:
             await send(text, reply_markup=kb)
         elif cmd == "/extension" and admin:
             text = await self._extension_command(client, args, cid)
-            await send(text, reply_markup=self._extension_markup())
+            if text:
+                await send(text, reply_markup=self._extension_markup())
         elif cmd == "/update" and admin:
             await send("⬆️ Checking for updates…")
             await self.bot.run_update(client, manual_cid=cid)
@@ -367,6 +368,12 @@ class Controls:
             return
         if data.startswith("cy:"):
             await self._on_cycle_button(client, cq, cid, data)
+            return
+        if data.startswith("extdv:") or data.startswith("extrv:"):
+            if not self.users.is_admin(cid):
+                await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
+                return
+            await self._on_devices_button(client, cq, cid, msg, data)
             return
         if data.startswith("extqr:") and data[6:] in ("dm", "notify", "off"):
             if not self.users.is_admin(cid):
@@ -569,7 +576,32 @@ class Controls:
         cur = ep.qr_mode(self.bot.state)
         modes = [{"text": ("✅ " if cur == k else "") + {"dm": "📷 QR in DM", "notify": "🔔 Pay manually", "off": "⛔ QR off"}[k],
                   "callback_data": f"extqr:{k}"} for k in ("dm", "notify", "off")]
-        return {"inline_keyboard": [[btn], modes]}
+        return {"inline_keyboard": [[btn], modes, [{"text": "💻 Connected browsers", "callback_data": "extdv:list"}]]}
+
+    async def _devices_view(self, client) -> tuple[str, dict]:
+        from . import extension_push as ep
+        devs = await ep.devices(client, self.bot.state)
+        now = time.time()
+        if not devs:
+            text = ("💻 <b>Connected browsers</b>\n\nNo browser has reported in the last 12 hours.\n"
+                    "<i>Browsers report every few minutes while they're open (needs extension 2.3.0+).</i>")
+        else:
+            rows = []
+            for d in devs:
+                ago = now - d.get("ts", 0)
+                dot = "🟢" if ago < 10 * 60 else "⚪"
+                seen = "now" if ago < 90 else f"{int(ago // 60)} min ago" if ago < 3600 else f"{ago / 3600:.1f} h ago"
+                mob = f" · +91 {d['mobile']}" if d.get("mobile") else ""
+                state = "⏸ paused" if d.get("paused") else {"dm": "📷 QR in DM", "notify": "🔔 pay manually", "off": "⛔ QR off"}.get(d.get("qr"), "")
+                rows.append(f"{dot} <b>{html.escape(d.get('account') or '?')}</b>{html.escape(mob)}\n"
+                            f"    {html.escape(d.get('browser') or '?')} · profile {html.escape(d.get('profile') or '?')} · "
+                            f"v{html.escape(str(d.get('version') or '?'))}\n    {state} · seen {seen}")
+            text = f"💻 <b>Connected browsers ({len(devs)})</b>\n\n" + "\n\n".join(rows)
+        kb = [[{"text": f"🚫 Revoke {(d.get('account') or '?')[:14]} · {(d.get('browser') or '?')[:8]} · {(d.get('profile') or '?')[:10]}",
+                "callback_data": f"extrv:{d['id'][:40]}"}] for d in devs[:20]]
+        kb.append([{"text": "🔄 Refresh", "callback_data": "extdv:list"},
+                   {"text": "⛔ Revoke ALL (new code)", "callback_data": "extdv:all?"}])
+        return text, {"inline_keyboard": kb}
 
     def _extension_state_text(self) -> str:
         from . import extension_push as ep
@@ -590,6 +622,43 @@ class Controls:
         self.bot.state.save()
         await ep.publish_control(client, self.bot.state)
 
+    async def _on_devices_button(self, client, cq, cid, msg, data) -> None:
+        from . import extension_push as ep
+        mid = msg.get("message_id")
+        if data == "extdv:all?":
+            await self.tg.answer_callback(client, cq["id"])
+            await self.tg.edit(client, cid, mid,
+                               "⛔ <b>Revoke ALL browsers?</b>\n\nEvery connected browser is disconnected and wipes its "
+                               "connection. The setup code changes, so old copies can't listen any more. "
+                               "You'll need to connect the browsers you keep again with the new code from /extension.",
+                               reply_markup={"inline_keyboard": [[{"text": "Yes, revoke all", "callback_data": "extdv:all!"},
+                                                                  {"text": "Cancel", "callback_data": "extdv:list"}]]})
+            return
+        if data == "extdv:all!":
+            new = await ep.revoke_all(client, self.bot.state)
+            await self.tg.answer_callback(client, cq["id"], "All revoked" if new else "Not possible")
+            await self.tg.edit(client, cid, mid,
+                               "✅ <b>All browsers revoked.</b> The connection code has changed – send /extension for "
+                               "the new setup code and reconnect the browsers you keep.\n\n"
+                               "<i>For full safety also change the bot token: @BotFather → /revoke, then put the new "
+                               "token in .env and restart the bot.</i>" if new else
+                               "❌ The feed is fixed by the NTFY_TOPIC setting, so it can't be changed from here. "
+                               "Change NTFY_TOPIC and restart the bot to cut off every browser.")
+            return
+        if data.startswith("extrv:"):
+            dev = data[6:]
+            await ep.revoke(client, self.bot.state, dev)
+            await self.tg.answer_callback(client, cq["id"], "Revoked 🚫")
+        else:
+            await self.tg.answer_callback(client, cq["id"])
+        text, kb = await self._devices_view(client)
+        if data.startswith("extrv:"):
+            text = "🚫 Browser revoked – it disconnects and wipes its connection as soon as it's online.\n\n" + text
+        try:
+            await self.tg.edit(client, cid, mid, text, reply_markup=kb)
+        except Exception:  # noqa: BLE001
+            await self.tg.send(client, text, chat_ids=[cid], reply_markup=kb)
+
     async def _set_qr_mode(self, client, mode: str) -> None:
         from . import extension_push as ep
         self.bot.state.settings["ext_qr_mode"] = mode
@@ -608,6 +677,10 @@ class Controls:
             return self._extension_state_text()
         if sub == "status":
             return self._extension_state_text()
+        if sub in ("browsers", "devices", "list"):
+            text, kb = await self._devices_view(client)
+            await self.tg.send(client, text, chat_ids=[str(cid)], reply_markup=kb)
+            return ""
         if sub in ("qr", "mode"):
             want = {"dm": "dm", "photo": "dm", "notify": "notify", "manual": "notify", "off": "off"}.get(args[1].lower() if len(args) > 1 else "")
             if not want:
@@ -637,6 +710,7 @@ class Controls:
                 "5. Send <code>/extension test &lt;product link&gt;</code> to try it.\n\n"
                 "Pause/resume any time: the button below, or <code>/extension off</code> / <code>/extension on</code>.\n"
                 "QR mode for all browsers: the buttons below, or <code>/extension qr dm</code> · <code>manual</code> · <code>off</code>.\n"
+                "See or revoke connected browsers: 💻 below, or <code>/extension browsers</code>.\n"
                 "<i>⚠ The setup code contains your bot token – don't forward it. Delete this message after setup.</i>")
 
     async def _on_user_button(self, client, cq, cid, data) -> None:

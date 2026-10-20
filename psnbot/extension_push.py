@@ -80,7 +80,8 @@ def setup_code(state, chat_id, token: str) -> str:
 
 async def publish_control(client, state) -> bool:
     """Tell every connected extension whether it may act (paused = Telegram alerts only)."""
-    payload = {"v": 1, "type": "control", "paused": paused(state), "ts": time.time()}
+    payload = {"v": 1, "type": "control", "paused": paused(state), "ts": time.time(),
+               "revoked": revoked(state)}
     if qr_mode(state):
         payload["qr_mode"] = qr_mode(state)
     try:
@@ -90,3 +91,60 @@ async def publish_control(client, state) -> bool:
     except Exception as e:  # noqa: BLE001
         log.warning("Extension control push failed: %r", e)
         return False
+
+
+# ---- connected browsers (each extension posts a small heartbeat to <topic>-hb) ----
+def hb_topic(state) -> str:
+    return topic(state) + "-hb"
+
+
+def revoked(state) -> list[str]:
+    return list(state.settings.get("ext_revoked") or [])
+
+
+async def devices(client, state) -> list[dict]:
+    """Latest heartbeat per browser (ntfy keeps ~12 h), newest first; revoked ones left out."""
+    try:
+        r = await client.get(f"{server()}/{hb_topic(state)}/json", params={"poll": "1", "since": "24h"}, timeout=15)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Extension heartbeat read failed: %r", e)
+        return []
+    out: dict[str, dict] = {}
+    gone = set(revoked(state))
+    for line in r.text.splitlines():
+        try:
+            d = json.loads(json.loads(line).get("message") or "{}")
+        except ValueError:
+            continue
+        if d.get("type") != "hb" or not d.get("id") or d["id"] in gone:
+            continue
+        if d.get("ts", 0) >= out.get(d["id"], {}).get("ts", 0):
+            out[d["id"]] = d
+    return sorted(out.values(), key=lambda d: -d.get("ts", 0))
+
+
+async def revoke(client, state, device_id: str) -> None:
+    lst = [x for x in revoked(state) if x != device_id] + [device_id]
+    state.settings["ext_revoked"] = lst[-100:]
+    state.save()
+    await publish_control(client, state)
+
+
+async def revoke_all(client, state) -> str | None:
+    """Cut off every browser: tell them, then switch to a new random feed. Returns the new topic
+    (None if the topic is fixed by NTFY_TOPIC)."""
+    if os.environ.get("NTFY_TOPIC", "").strip():
+        return None
+    old = topic(state)
+    try:
+        await client.post(f"{server()}/{old}", timeout=10, headers={"Tags": "psnctl"},
+                          content=json.dumps({"v": 1, "type": "control", "revoke_all": True, "ts": time.time(),
+                                              "paused": paused(state)}).encode())
+    except Exception as e:  # noqa: BLE001
+        log.warning("Revoke-all push failed: %r", e)
+    state.settings["ext_topic"] = None
+    state.settings["ext_revoked"] = []
+    state.save()
+    new = topic(state)
+    await publish_control(client, state)
+    return new

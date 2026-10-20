@@ -74,6 +74,8 @@ Setup: send `/extension` to the bot (owner only). Load the `extension/` folder (
 
 **QR mode from Telegram:** the buttons under `/extension` (📷 QR in DM · 🔔 Pay manually · ⛔ QR off), or `/extension qr dm` / `manual` / `off`, set the QR mode in every connected browser at once. Each browser confirms in Telegram. You can still change it per browser in Options afterwards.
 
+**Connected browsers:** tap 💻 under `/extension` (or `/extension browsers`) to see every browser that reported in the last 12 hours: account, mobile, browser, profile, version, QR mode, paused or not, and when it was last seen (🟢 = in the last 10 min). **🚫 Revoke** disconnects one browser: it wipes its connection and bot token and shows the setup screen, even if it was offline at the time. **⛔ Revoke ALL** disconnects every browser and switches to a new connection code, so old copies can't listen any more.
+
 The bot sends restocks to a private, random [ntfy.sh](https://ntfy.sh) topic, and the extension listens there (free, no account). It only opens links on known store sites, and only clicks in tabs it opened itself. Its options include a price limit, per-store switches and an auto-click switch. Turn the push off with `extension_push: false`.
 
 ### Telegram commands

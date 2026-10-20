@@ -53,6 +53,7 @@ async function load() {
     : ["⏳ " + (s.conn || "connecting"), "warn"];
   pill.textContent = txt; pill.className = "pill " + cls;
   $("pausedBanner").classList.toggle("hidden", !s.remotePaused);
+  $("revokedBanner").classList.toggle("hidden", !(s.revokedAt && !s.setupDone));
 
   // setup screen
   const showSetup = editing || !s.setupDone;
@@ -157,7 +158,7 @@ $("connect").onclick = async () => {
     topic: v.topic, ...(v.server ? { server: v.server } : {}), tgToken: v.tgToken, tgChatId: v.tgChatId,
     browserType: v.browserType, profileName: v.profileName, accountName: v.accountName,
     gtsMobile: detected && detected === v.mobile ? "" : v.mobile,                  // typed = override
-    browserName: `${v.browserType} · ${v.profileName} · ${v.accountName}`, setupDone: true, enabled: true,
+    browserName: `${v.browserType} · ${v.profileName} · ${v.accountName}`, setupDone: true, enabled: true, revokedAt: 0,
   });
   chrome.runtime.sendMessage({ type: "settings-changed" }).catch(() => {});
   btn.textContent = "Connecting to the feed…";

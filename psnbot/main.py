@@ -30,6 +30,7 @@ from .users import Users
 from . import warp as warpmod
 from . import extension_push
 from . import report
+from .groups import Groups
 
 log = logging.getLogger("psnbot")
 IST = ZoneInfo("Asia/Kolkata")
@@ -169,6 +170,7 @@ class Bot:
         self._warp_client = None
         if self.warp_stores:
             self.warp = warpmod.Warp(self.state)
+        self.groups = Groups(self)
         self.controls = Controls(self)
 
     async def broadcast(self, client, text: str, *, store_id: str | None = None, pref: str | None = None,
@@ -468,6 +470,16 @@ class Bot:
     async def _notify(self, client, restocked, sold_out) -> None:
         if restocked:
             await self._send_restock(client, restocked)
+            for store_name, items in restocked.items():
+                try:
+                    await self.groups.publish(client, store_name, sorted(items, key=_sort_key), _fmt_item, _now())
+                except Exception:  # noqa: BLE001 - groups must never block personal alerts
+                    log.exception("Posting to groups failed")
+        if sold_out:
+            try:
+                await self.groups.sold_out(client, {it.key for pairs in sold_out.values() for it, _ in pairs})
+            except Exception:  # noqa: BLE001
+                log.exception("Updating group posts failed")
         if sold_out and self.notify_oos:
             await self._send_sold_out(client, sold_out)
 

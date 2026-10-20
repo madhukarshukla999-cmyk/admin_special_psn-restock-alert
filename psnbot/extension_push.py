@@ -148,3 +148,36 @@ async def revoke_all(client, state) -> str | None:
     new = topic(state)
     await publish_control(client, state)
     return new
+
+
+async def refresh_purchases(client, state) -> int:
+    """Merge 'buy' events (posted by each browser after a successful payment) into
+    state.settings['purchases'] (last 120 days). ntfy keeps events ~12 h, so this runs often."""
+    if not state.settings.get("ext_topic") and not os.environ.get("NTFY_TOPIC"):
+        return 0
+    try:
+        r = await client.get(f"{server()}/{hb_topic(state)}/json", params={"poll": "1", "since": "24h"}, timeout=15)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Purchases read failed: %r", e)
+        return 0
+    lst = state.settings.setdefault("purchases", [])
+    seen = {(p.get("dev"), round(p.get("ts", 0))) for p in lst}
+    added = 0
+    for line in r.text.splitlines():
+        try:
+            d = json.loads(json.loads(line).get("message") or "{}")
+        except ValueError:
+            continue
+        if d.get("type") != "buy" or d.get("test"):
+            continue
+        k = (d.get("dev"), round(d.get("ts", 0)))
+        if k in seen:
+            continue
+        seen.add(k)
+        lst.append({x: d.get(x) for x in ("dev", "ts", "store", "title", "amount", "order", "account", "profile", "browser")})
+        added += 1
+    if added:
+        cutoff = time.time() - 120 * 86400
+        state.settings["purchases"] = [p for p in lst if p.get("ts", 0) >= cutoff][-500:]
+        state.save()
+    return added

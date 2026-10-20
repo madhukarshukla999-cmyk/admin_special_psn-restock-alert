@@ -81,6 +81,10 @@ The bot sends restocks to a private, random [ntfy.sh](https://ntfy.sh) topic, an
 ### Telegram commands
 Tap the bot's **Menu** button, or type a command:
 - `/menu`: your own ✅/🔕 button per store, **🔔 All on / 🔕 All off**, and switches for **sold-out alerts**, the **daily summary**, **WhatsApp** and **email**
+  - **💳 Card values:** alerts only for the values you want, e.g. ₹2000 and above everywhere, or only ₹1000 on Amazon (a rule per store).
+  - **🌙 Quiet hours:** no restock or sold-out alerts at night (e.g. 23:00–07:00, or `/quiet 23:30 06:45`). When they end you get **one message** with what you missed and whether it's still in stock. Stores you pick can still alert at night.
+  - **📊 Weekly report** (Sundays at the daily-summary time, or any time with `/week`): restocks per store, how long they usually lasted, the busiest day and hour, which store sells out fastest. The owner's report also lists **what you bought**, as recorded by the browser extension after a successful payment.
+- `/panel` (owner): **everything in one message**: bot health, stock, extension on/pause, QR mode, browsers online, check speed and burst status, quiet hours, card values, weekly report and *Check all now*. Each button updates the same message and has a ⬅ Back.
 - `/status`: what's in stock right now (and for how long)
 - `/check`: check every store right now
 - `/history`: restocks in the last 7 days and how long each lasted (`/history 30` for 30 days)

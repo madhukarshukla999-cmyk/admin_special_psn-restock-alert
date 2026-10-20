@@ -19,12 +19,17 @@ import re
 import time
 
 from . import history as hist
+from . import report
+from .users import CARD_VALUES, hm, parse_hm, rule_text
 from .channels import CALLMEBOT_HELP, CALLMEBOT_NUMBER, EMAIL_RE, clean_phone, send_whatsapp
 
 log = logging.getLogger(__name__)
 
 COMMANDS = [
-    {"command": "menu", "description": "Turn notifications on/off"},
+    {"command": "menu", "description": "My alerts: stores, card values, quiet hours"},
+    {"command": "panel", "description": "(owner) Control panel"},
+    {"command": "week", "description": "Weekly report"},
+    {"command": "quiet", "description": "Quiet hours, e.g. /quiet 23:00 07:00"},
     {"command": "status", "description": "What's in stock right now"},
     {"command": "check", "description": "Check every store now"},
     {"command": "history", "description": "Restocks in the last 7 days"},
@@ -64,6 +69,12 @@ def parse_secs(raw: str) -> int | None:
     return int(n * (3600 if unit == "h" else 60 if unit.startswith("m") else 1))
 
 
+def datetime_now() -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d %b %I:%M %p")
+
+
 def _ago(ts: float | None) -> str:
     if not ts:
         return "never"
@@ -93,8 +104,11 @@ class Controls:
             lines.append(f"{'✅' if on else '🔕'} <b>{html.escape(s.name)}</b>: {'on' if on else 'off'}"
                          + (f" · {n} in stock" if n else ""))
         lines += ["",
+                  f"💳 Card values: <b>{self._values_short(cid)}</b>",
+                  f"🌙 Quiet hours: <b>{self._quiet_short(cid)}</b>",
                   f"🔴 Sold-out alerts: <b>{'on' if self.users.pref(cid, 'soldout') else 'off'}</b>",
-                  f"📰 Daily summary: <b>{'on' if self.users.pref(cid, 'summary') else 'off'}</b>",
+                  f"📰 Daily summary: <b>{'on' if self.users.pref(cid, 'summary') else 'off'}</b>"
+                  f" · 📊 Weekly report: <b>{'on' if self.users.pref(cid, 'weekly') else 'off'}</b>",
                   self._channel_line(cid, "whatsapp"), self._channel_line(cid, "email"),
                   "", "Tap a button to switch it.",
                   "<i>Muted stores keep being checked, so switching one back on only sends new restocks.</i>"]
@@ -107,9 +121,12 @@ class Controls:
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         rows.append([{"text": "🔔 All on", "callback_data": "all:on"},
                      {"text": "🔕 All off", "callback_data": "all:off"}])
-        so, su = self.users.pref(cid, "soldout"), self.users.pref(cid, "summary")
-        rows.append([{"text": f"{'✅' if so else '🔕'} Sold-out alerts", "callback_data": "p:soldout"},
-                     {"text": f"{'✅' if su else '🔕'} Daily summary", "callback_data": "p:summary"}])
+        rows.append([{"text": f"💳 Card values: {self._values_short(cid, 14)}", "callback_data": "cv:mn:home"},
+                     {"text": f"🌙 Quiet: {self._quiet_short(cid)}", "callback_data": "qh:mn:home"}])
+        so, su, wk = (self.users.pref(cid, x) for x in ("soldout", "summary", "weekly"))
+        rows.append([{"text": f"{'✅' if so else '🔕'} Sold-out", "callback_data": "p:soldout"},
+                     {"text": f"{'✅' if su else '🔕'} Daily", "callback_data": "p:summary"},
+                     {"text": f"{'✅' if wk else '🔕'} Weekly", "callback_data": "p:weekly"}])
         ch_row = []
         for name, label in (("whatsapp", "WhatsApp"), ("email", "Email")):
             if self.users.channel(cid, name):
@@ -117,8 +134,139 @@ class Controls:
                 ch_row.append({"text": f"{'✅' if on else '🔕'} {label}", "callback_data": f"p:{name}"})
         if ch_row:
             rows.append(ch_row)
-        rows.append([{"text": "🔄 Refresh", "callback_data": "refresh"}])
+        last = [{"text": "📊 This week", "callback_data": "wk:mn"}, {"text": "🔄 Refresh", "callback_data": "refresh"}]
+        if self.users.is_admin(cid):
+            last.append({"text": "🎛 Owner panel", "callback_data": "pn:home"})
+        rows.append(last)
         return {"inline_keyboard": rows}
+
+    # -- quiet hours / card values: short labels -------------------------
+    def _quiet_short(self, cid) -> str:
+        q = self.users.quiet(cid)
+        return f"{hm(q['start'])}–{hm(q['end'])}" if q else "off"
+
+    def _values_short(self, cid, maxlen: int = 40) -> str:
+        rec = self.users.get(cid) or {}
+        vals = rec.get("values") or {}
+        base = rule_text(vals.get("*"))
+        extra = len([k for k in vals if k != "*"])
+        txt = base + (f" (+{extra} store rule{'s' if extra > 1 else ''})" if extra else "")
+        return txt if len(txt) <= maxlen else txt[:maxlen - 1] + "…"
+
+    # -- quiet hours screen ------------------------------------------------
+    QUIET_PRESETS = [(22 * 60, 7 * 60), (23 * 60, 7 * 60), (0, 8 * 60), (1 * 60, 9 * 60)]
+
+    def quiet_view(self, cid, origin: str = "mn") -> tuple[str, dict]:
+        q = self.users.quiet(cid)
+        raw = (self.users.get(cid) or {}).get("quiet") or {}
+        allow = set(raw.get("allow", []))
+        if q:
+            head = (f"🌙 <b>Quiet hours: {hm(q['start'])} – {hm(q['end'])}</b> (IST)\n\n"
+                    "During these hours I won't send restock or sold-out alerts. When they end you get "
+                    "<b>one message</b> with everything you missed, and whether it's still in stock.")
+            if self.users.in_quiet(cid):
+                head += "\n\n😴 <i>Quiet hours are on right now.</i>"
+        else:
+            head = ("🌙 <b>Quiet hours: off</b>\n\n"
+                    "Pick a time to stop alerts at night. You'll get one morning message with what you missed.")
+        names = [self.bot.names[s] for s in allow if s in self.bot.names]
+        head += ("\n\n🔔 Still alert me at night for: <b>" + ", ".join(names) + "</b>" if names else
+                 "\n\n🔔 Tap a store below if you still want its alerts at night (e.g. a store that sells out fast).")
+        head += "\n\n<i>Other times: type e.g.</i> <code>/quiet 23:30 06:45</code>"
+        o = origin
+        cur = (q["start"], q["end"]) if q else None
+        presets = [{"text": ("✅ " if cur == (s, e) else "") + f"{hm(s)}–{hm(e)}", "callback_data": f"qh:{o}:set:{s}:{e}"}
+                   for s, e in self.QUIET_PRESETS]
+        rows = [presets[:2], presets[2:], [{"text": ("✅ " if not q else "") + "🔔 Off – alert me any time", "callback_data": f"qh:{o}:off"}]]
+        sb = [{"text": f"{'🔔' if s.id in allow else '🌙'} {s.name}", "callback_data": f"qh:{o}:al:{s.id}"} for s in self.bot.stores]
+        rows += [sb[i:i + 2] for i in range(0, len(sb), 2)]
+        rows.append(self._back_row(o))
+        return head, {"inline_keyboard": rows}
+
+    # -- card values screen ------------------------------------------------
+    MIN_PRESETS = [0, 500, 1000, 2000, 3000, 5000]
+
+    def values_view(self, cid, origin: str = "mn") -> tuple[str, dict]:
+        base = self.users.value_rule(cid, None)
+        lines = ["💳 <b>Which cards do you want alerts for?</b>", "",
+                 f"All stores: <b>{rule_text(base)}</b>"]
+        for s in self.bot.stores:
+            if self.users.has_store_rule(cid, s.id):
+                lines.append(f"• {html.escape(s.name)}: <b>{rule_text(self.users.value_rule(cid, s.id))}</b>")
+        lines += ["", "Tap a value for <b>all stores</b>, or tap a store to give it its own rule "
+                  "(e.g. only ₹1000 on Amazon).", "<i>Cards whose value I can't read are always sent.</i>"]
+        o = origin
+        cur = base.get("min", 0) if not base.get("only") else None
+        mins = [{"text": ("✅ " if cur == v else "") + ("Any value" if not v else f"₹{v:,}+"),
+                 "callback_data": f"cv:{o}:all:{v}"} for v in self.MIN_PRESETS]
+        rows = [mins[:3], mins[3:]]
+        sb = []
+        for s in self.bot.stores:
+            tag = rule_text(self.users.value_rule(cid, s.id)) if self.users.has_store_rule(cid, s.id) else "same"
+            sb.append({"text": f"⚙ {s.name} · {tag}"[:40], "callback_data": f"cv:{o}:st:{s.id}"})
+        rows += [sb[i:i + 2] for i in range(0, len(sb), 2)]
+        rows.append(self._back_row(o))
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    def values_store_view(self, cid, sid: str, origin: str = "mn") -> tuple[str, dict]:
+        name = self.bot.names.get(sid, sid)
+        own = self.users.has_store_rule(cid, sid)
+        rule = self.users.value_rule(cid, sid)
+        lines = [f"💳 <b>{html.escape(name)}</b>: {'<b>' + rule_text(rule) + '</b>' if own else 'same as all stores (' + rule_text(rule) + ')'}",
+                 "", "Pick a minimum, or tick the exact values you want (tap again to untick)."]
+        o = origin
+        only = set(rule.get("only") or []) if own else set()
+        cur_min = rule.get("min", 0) if own and not only else None
+        rows = [[{"text": ("✅ " if not own else "") + "↩ Same as all stores", "callback_data": f"cv:{o}:sm:{sid}:same"}]]
+        mins = [{"text": ("✅ " if cur_min == v else "") + ("Any value" if not v else f"₹{v:,}+"),
+                 "callback_data": f"cv:{o}:sm:{sid}:{v}"} for v in self.MIN_PRESETS]
+        rows += [mins[:3], mins[3:]]
+        exact = [{"text": ("✅ " if v in only else "") + f"₹{v:,}", "callback_data": f"cv:{o}:so:{sid}:{v}"} for v in CARD_VALUES]
+        rows += [exact[:4], exact[4:]]
+        rows.append([{"text": "⬅ All stores", "callback_data": f"cv:{o}:home"}])
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    def _back_row(self, origin: str) -> list[dict]:
+        return [{"text": "⬅ Back to panel", "callback_data": "pn:home"}] if origin == "pn" else \
+               [{"text": "⬅ Back to my alerts", "callback_data": "refresh"}]
+
+    # -- owner panel -------------------------------------------------------
+    async def panel_view(self, client, cid) -> tuple[str, dict]:
+        from . import extension_push as ep
+        b = self.bot
+        st = b.state
+        bad = [s.name for s in b.stores if (st.store_errors.get(s.id) or {}).get("count", 0) >= b.error_alert_after]
+        stock = sum(1 for r in st.items.values() if r.get("in_stock"))
+        up = hist.fmt_duration(time.time() - b.started)
+        devs = await ep.devices(client, st)
+        online = [d for d in devs if time.time() - d.get("ts", 0) < 600]
+        paused = ep.paused(st)
+        mode = ep.qr_mode(st)
+        mode_txt = {"dm": "📷 QR in DM", "notify": "🔔 pay manually", "off": "⛔ off"}.get(mode, "set per browser")
+        bursting = [s.name for s in b.stores if b.burst_active(s)]
+        week = hist.recent(st.history, 7 * 86400)
+        lines = [f"🎛 <b>Owner panel</b> · <i>{datetime_now()}</i>", "",
+                 f"🤖 Bot running for {up} · {len(b.stores) - len(bad)}/{len(b.stores)} stores OK"
+                 + (f"\n     ⚠ Can't check: {', '.join(bad)}" if bad else ""),
+                 f"📦 In stock right now: <b>{stock}</b> · {len(week)} restocks this week",
+                 f"💻 Extension: <b>{'⏸ paused' if paused else '▶ on'}</b> · QR: <b>{mode_txt}</b>"
+                 f" · <b>{len(online)}</b> browser{'s' if len(online) != 1 else ''} online",
+                 f"⏱ Check speed: " + (f"<b>⚡ burst now</b> ({', '.join(bursting)})" if bursting else "normal"),
+                 f"🌙 Your quiet hours: <b>{self._quiet_short(cid)}</b> · 💳 Your cards: <b>{self._values_short(cid, 30)}</b>",
+                 "", "Tap a button – everything changes right here."]
+        cur = mode or ""
+        rows = [
+            [{"text": "▶ Turn extension ON" if paused else "⏸ Pause extension", "callback_data": "pn:resume" if paused else "pn:pause"},
+             {"text": f"💻 Browsers ({len(online)} online)", "callback_data": "extdv:list"}],
+            [{"text": ("✅ " if cur == k else "") + lbl, "callback_data": f"pn:qr:{k}"}
+             for k, lbl in (("dm", "📷 QR in DM"), ("notify", "🔔 Pay manually"), ("off", "⛔ QR off"))],
+            [{"text": "⏱ Check speed", "callback_data": "cy:list"}, {"text": "🏪 Stores & my alerts", "callback_data": "refresh"}],
+            [{"text": "🌙 Quiet hours", "callback_data": "qh:pn:home"}, {"text": "💳 Card values", "callback_data": "cv:pn:home"}],
+            [{"text": "📊 Weekly report", "callback_data": "wk:pn"}, {"text": "🔎 Check all now", "callback_data": "pn:check"},
+             {"text": "🔄 Refresh", "callback_data": "pn:home"}],
+        ]
+        return "\n".join(lines), {"inline_keyboard": rows}
+
 
     def _channel_line(self, cid, name: str) -> str:
         label = "💬 WhatsApp" if name == "whatsapp" else "📧 Email"
@@ -155,6 +303,7 @@ class Controls:
                   "<i>Or type e.g. /cycle amazon 2m, /cycle amazon fast 30s, /cycle amazon default</i>"]
         btns = [{"text": f"⏱ {s.name}", "callback_data": f"cy:{s.id}"} for s in b.stores]
         rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+        rows.append([{"text": "⬅ Back to panel", "callback_data": "pn:home"}])
         return "\n".join(lines), {"inline_keyboard": rows}
 
     def cycle_store_view(self, sid: str) -> tuple[str, dict]:
@@ -266,7 +415,10 @@ class Controls:
 
     HELP = ("🤖 I check PlayStation gift card stock and message you when a card comes back "
             "(and when it sells out).\n\n"
-            "/menu: switch notifications per store or all at once, sold-out alerts, daily summary\n"
+            "/menu: <b>your alerts</b> – stores, which card values (e.g. only ₹2000+), quiet hours at night, "
+            "sold-out alerts, daily and weekly reports\n"
+            "/week: this week's report\n"
+            "/quiet 23:00 07:00: no alerts at night (one morning message instead)\n"
             "/status: what's in stock right now\n"
             "/check: check every store now\n"
             "/history: restocks in the last 7 days\n"
@@ -274,7 +426,7 @@ class Controls:
             "/health: is every store being checked OK\n"
             "/cycles: how often each store is checked\n"
             "/whatsapp, /email: get alerts there too (on/off any time)\n\n"
-            "Owner only: /users (who gets alerts), /update (install the latest version), changing /cycles\n\n"
+            "Owner only: <b>/panel</b> (everything in one place), /users, /update, /extension, changing /cycles\n\n"
             "Turning a store off only stops its messages; it's still checked in the background.")
 
     # -- handling --------------------------------------------------------
@@ -314,6 +466,23 @@ class Controls:
         admin = self.users.is_admin(cid)
         if cmd in ("/menu", "/start", "/settings", "/notifications"):
             await send(self.menu_text(cid), reply_markup=self.menu_markup(cid))
+        elif cmd in ("/panel", "/dashboard", "/owner") and admin:
+            text, kb = await self.panel_view(client, cid)
+            await send(text, reply_markup=kb)
+        elif cmd in ("/week", "/weekly", "/report"):
+            from . import extension_push as ep
+            if admin:
+                await ep.refresh_purchases(client, self.bot.state)
+            await send(report.weekly_text(self.bot, cid))
+        elif cmd in ("/quiet", "/night"):
+            if not args:
+                text, kb = self.quiet_view(cid)
+                await send(text, reply_markup=kb)
+            else:
+                await send(self._quiet_command(cid, args)[0])
+        elif cmd in ("/values", "/cards"):
+            text, kb = self.values_view(cid)
+            await send(text, reply_markup=kb)
         elif cmd == "/status":
             await send(self.status_text(cid))
         elif cmd == "/history":
@@ -352,7 +521,7 @@ class Controls:
             await self.bot.run_update(client, manual_cid=cid)
         elif cmd == "/help":
             await send(self.HELP)
-        elif cmd in ("/users", "/update", "/extension"):
+        elif cmd in ("/users", "/update", "/extension", "/panel", "/dashboard", "/owner"):
             await send("Only the owner can use that.")
 
     async def _on_button(self, client, cq: dict) -> None:
@@ -365,6 +534,24 @@ class Controls:
 
         if data.startswith("u:"):
             await self._on_user_button(client, cq, cid, data)
+            return
+        mid = msg.get("message_id")
+        if data.startswith("qh:") or data.startswith("cv:"):
+            await self._on_personal_button(client, cq, cid, mid, data)
+            return
+        if data.startswith("wk:"):
+            await self.tg.answer_callback(client, cq["id"], "Weekly report 📊")
+            from . import extension_push as ep
+            if self.users.is_admin(cid):
+                await ep.refresh_purchases(client, self.bot.state)
+            back = self._back_row("pn" if data == "wk:pn" else "mn")
+            await self.tg.edit(client, cid, mid, report.weekly_text(self.bot, cid), {"inline_keyboard": [back]})
+            return
+        if data.startswith("pn:"):
+            if not self.users.is_admin(cid):
+                await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
+                return
+            await self._on_panel_button(client, cq, cid, mid, data)
             return
         if data.startswith("cy:"):
             await self._on_cycle_button(client, cq, cid, data)
@@ -414,9 +601,10 @@ class Controls:
             muted, note = set(), "All stores on ✅"
         elif data == "all:off":
             muted, note = set(ids), "All stores off 🔕"
-        elif data in ("p:soldout", "p:summary"):
+        elif data in ("p:soldout", "p:summary", "p:weekly"):
             on = self.users.toggle_pref(cid, data[2:])
-            note = f"{'Sold-out alerts' if data == 'p:soldout' else 'Daily summary'}: {'on ✅' if on else 'off 🔕'}"
+            label = {"p:soldout": "Sold-out alerts", "p:summary": "Daily summary", "p:weekly": "Weekly report"}[data]
+            note = f"{label}: {'on ✅' if on else 'off 🔕'}"
         elif data in ("p:whatsapp", "p:email") and self.users.channel(cid, data[2:]):
             ch = self.users.channel(cid, data[2:])
             ch["on"] = not ch.get("on", True)
@@ -427,6 +615,93 @@ class Controls:
             log.info("%s settings: %s", cid, note)
         await self.tg.answer_callback(client, cq["id"], note)
         await self.tg.edit(client, cid, msg.get("message_id"), self.menu_text(cid), self.menu_markup(cid))
+
+    async def _on_panel_button(self, client, cq, cid, mid, data) -> None:
+        from . import extension_push as ep
+        note = ""
+        if data == "pn:pause":
+            await self._set_extension_paused(client, True)
+            note = "Extension paused ⏸ – Telegram alerts only"
+        elif data == "pn:resume":
+            await self._set_extension_paused(client, False)
+            note = "Extension on ▶"
+        elif data.startswith("pn:qr:") and data[6:] in ep.QR_MODES:
+            await self._set_qr_mode(client, data[6:])
+            note = ep.QR_MODES[data[6:]]
+        elif data == "pn:check":
+            wait = 60 - (time.time() - self._last_manual_check)
+            if wait > 0:
+                note = f"A check just ran – try again in {int(wait)} s"
+            else:
+                self._last_manual_check = time.time()
+                self.bot.request_check(cid)
+                note = "Checking every store now… 🔎"
+        await self.tg.answer_callback(client, cq["id"], note)
+        text, kb = await self.panel_view(client, cid)
+        await self.tg.edit(client, cid, mid, text, kb)
+
+    async def _on_personal_button(self, client, cq, cid, mid, data) -> None:
+        kind, origin, *rest = data.split(":")
+        action = rest[0] if rest else "home"
+        note = ""
+        if kind == "qh":
+            if action == "set" and len(rest) == 3 and rest[1].isdigit() and rest[2].isdigit():
+                s, e = int(rest[1]), int(rest[2])
+                self.users.set_quiet(cid, s, e)
+                note = f"Quiet hours {hm(s)}–{hm(e)} 🌙"
+            elif action == "off":
+                self.users.set_quiet(cid, None)
+                note = "Quiet hours off 🔔"
+            elif action == "al" and len(rest) == 2 and rest[1] in self.bot.names:
+                on = self.users.toggle_quiet_allow(cid, rest[1])
+                note = f"{self.bot.names[rest[1]]}: {'alerts at night too 🔔' if on else 'quiet at night 🌙'}"
+            if note:
+                self._save()
+            text, kb = self.quiet_view(cid, origin)
+        else:
+            sid = rest[1] if len(rest) > 1 else ""
+            if action == "all" and len(rest) == 2 and rest[1].isdigit():
+                v = int(rest[1])
+                self.users.set_value_rule(cid, "*", {"min": v} if v else None)
+                note = "All values" if not v else f"₹{v:,} and above"
+            elif action in ("sm", "so") and sid in self.bot.names and len(rest) == 3:
+                val = rest[2]
+                if action == "sm":
+                    if val == "same":
+                        self.users.set_value_rule(cid, sid, None)
+                        note = f"{self.bot.names[sid]}: same as all stores"
+                    elif val.isdigit():
+                        self.users.set_value_rule(cid, sid, {"min": int(val)})
+                        note = f"{self.bot.names[sid]}: " + rule_text({"min": int(val)})
+                elif val.isdigit():
+                    cur = self.users.value_rule(cid, sid) if self.users.has_store_rule(cid, sid) else {}
+                    only = set(cur.get("only") or [])
+                    only ^= {int(val)}
+                    self.users.set_value_rule(cid, sid, {"only": sorted(only)} if only else None)
+                    note = f"{self.bot.names[sid]}: " + (rule_text({"only": sorted(only)}) if only else "same as all stores")
+            if note:
+                self._save()
+            if action in ("st", "sm", "so") and sid in self.bot.names:
+                text, kb = self.values_store_view(cid, sid, origin)
+            else:
+                text, kb = self.values_view(cid, origin)
+        await self.tg.answer_callback(client, cq["id"], note)
+        await self.tg.edit(client, cid, mid, text, kb)
+
+    def _quiet_command(self, cid, args: list[str]) -> tuple:
+        if args[0].lower() in ("off", "stop", "none"):
+            self.users.set_quiet(cid, None)
+            self._save()
+            return ("🔔 Quiet hours off – I'll alert you any time.",)
+        if len(args) >= 2:
+            s, e = parse_hm(args[0]), parse_hm(args[-1])
+            if s is not None and e is not None and s != e:
+                self.users.set_quiet(cid, s, e)
+                self._save()
+                return (f"🌙 Quiet hours set: <b>{hm(s)} – {hm(e)}</b> IST.\n"
+                        "No alerts in that time; one message with what you missed when it ends. "
+                        "Change it any time in /menu → 🌙.",)
+        return ("Usage: <code>/quiet 23:00 07:00</code> (or <code>/quiet 11pm 7am</code>) · <code>/quiet off</code>",)
 
     async def _on_cycle_button(self, client, cq, cid, data) -> None:
         msg_id = (cq.get("message") or {}).get("message_id")
@@ -601,6 +876,7 @@ class Controls:
                 "callback_data": f"extrv:{d['id'][:40]}"}] for d in devs[:20]]
         kb.append([{"text": "🔄 Refresh", "callback_data": "extdv:list"},
                    {"text": "⛔ Revoke ALL (new code)", "callback_data": "extdv:all?"}])
+        kb.append([{"text": "⬅ Back to panel", "callback_data": "pn:home"}])
         return text, {"inline_keyboard": kb}
 
     def _extension_state_text(self) -> str:

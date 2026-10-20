@@ -34,7 +34,7 @@ function log(msg) {
 // ---- live connection to the bot's private ntfy topic (WebSocket) ----
 // Chrome (116+) keeps an extension service worker alive while a WebSocket is active; a 30 s
 // alarm also wakes it, so the connection is re-opened if Chrome ever stopped the worker.
-let ws = null, wsKey = "", lastMsg = 0;
+let ws = null, wsKey = "", lastMsg = 0, wsOpenedAt = Date.now();
 
 let chain = Promise.resolve();
 function ensureListener() {                 // one at a time, so an older call can't undo a newer one
@@ -52,7 +52,7 @@ async function connect() {
   const base = s.server.replace(/\/+$/, "").replace(/^http/, "ws");
   const since = lastMsg ? Math.max(lastMsg, Math.floor(Date.now() / 1000) - 120) : "2m";  // catch up after a drop
   ws = new WebSocket(`${base}/${encodeURIComponent(s.topic)}/ws?since=${since}`);
-  ws.onopen = () => { setStatus("connected"); syncControl(s).catch(() => {}); };
+  ws.onopen = () => { wsOpenedAt = Date.now(); setStatus("connected"); syncControl(s).catch(() => {}); };
   ws.onclose = () => { setStatus("reconnecting"); setTimeout(ensureListener, 3000); };
   ws.onerror = () => {};
   ws.onmessage = (e) => {
@@ -62,7 +62,9 @@ async function connect() {
       if (ev.event !== "message") return;
       lastMsg = Math.max(lastMsg, ev.time || 0);
       const data = JSON.parse(ev.message);
-      if (data && data.v === 1 && data.type === "control") return applyControl(data, true);
+      // control: only fresh ones live; older ones from the 2-min catch-up are covered by syncControl
+      if (data && data.v === 1 && data.type === "control")
+        return (data.ts || 0) * 1000 >= wsOpenedAt - 1000 ? applyControl(data, true) : undefined;
       if (data && data.v === 1 && Date.now() / 1000 - (data.ts || 0) < 180) handleAlert(data);
     } catch { /* not one of ours */ }
   };
@@ -377,14 +379,26 @@ async function syncControl(s) {
 }
 
 async function applyControl(d, live) {
-  const { remotePaused = false, setupDone = false } = await chrome.storage.local.get(["remotePaused", "setupDone"]);
+  const st = await chrome.storage.local.get({ remotePaused: false, setupDone: false, ctlTs: 0, qrMode: "dm", tgQr: true });
+  const notes = [];
   const paused = !!d.paused;
-  if (paused === remotePaused) return;
-  await chrome.storage.local.set({ remotePaused: paused });
-  await log(paused ? "⏸ Paused from Telegram – Telegram alerts only" : "▶ Turned on from Telegram");
-  chrome.notifications.create({ type: "basic", iconUrl: "icon.png", priority: 1,
-    title: "PSN Stock Bot", message: paused ? "Paused from Telegram – this browser won't open or click anything." : "Turned on from Telegram – ready for restocks." });
-  if (live && setupDone) await reportToOwner(paused ? "⏸ Extension paused" : "▶ Extension ON and connected");
+  if (paused !== st.remotePaused) {
+    await chrome.storage.local.set({ remotePaused: paused });
+    notes.push(paused ? "⏸ Extension paused" : "▶ Extension ON and connected");
+    await log(paused ? "⏸ Paused from Telegram – Telegram alerts only" : "▶ Turned on from Telegram");
+  }
+  // QR mode from Telegram: applied once per control message, so a later local change in Options
+  // isn't undone every time the browser reconnects
+  const MODES = { dm: "📷 Send QR in DM", notify: "🔔 Pay manually", off: "⛔ QR off" };
+  if (d.qr_mode && MODES[d.qr_mode] && (d.ts || 0) > st.ctlTs) {
+    const cur = !st.tgQr ? "off" : st.qrMode;
+    await chrome.storage.local.set({ ctlTs: d.ts || 0, ...(d.qr_mode === "off" ? { tgQr: false } : { tgQr: true, qrMode: d.qr_mode }) });
+    if (cur !== d.qr_mode) { notes.push(`💳 QR mode: ${MODES[d.qr_mode]}`); await log(`QR mode set from Telegram: ${MODES[d.qr_mode]}`); }
+  }
+  if (!notes.length) return;
+  chrome.notifications.create({ type: "basic", iconUrl: "icon.png", priority: 1, title: "PSN Stock Bot",
+    message: notes.join("\n") + (paused && notes[0].startsWith("⏸") ? "\nThis browser won't open or click anything." : "") });
+  if (live && st.setupDone) await reportToOwner(notes.join("\n"));
 }
 
 // short status message to the owner's chat, describing this browser

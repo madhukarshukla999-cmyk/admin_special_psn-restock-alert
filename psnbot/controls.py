@@ -368,6 +368,20 @@ class Controls:
         if data.startswith("cy:"):
             await self._on_cycle_button(client, cq, cid, data)
             return
+        if data.startswith("extqr:") and data[6:] in ("dm", "notify", "off"):
+            if not self.users.is_admin(cid):
+                await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
+                return
+            await self._set_qr_mode(client, data[6:])
+            from . import extension_push as ep
+            await self.tg.answer_callback(client, cq["id"], ep.QR_MODES[data[6:]])
+            try:
+                await self.tg.api(client, "editMessageReplyMarkup", {"chat_id": cid, "message_id": msg.get("message_id"),
+                                                                      "reply_markup": self._extension_markup()})
+            except Exception:  # noqa: BLE001
+                pass
+            await self.tg.send(client, self._extension_state_text(), chat_ids=[cid])
+            return
         if data in ("ext:on", "ext:off"):
             if not self.users.is_admin(cid):
                 await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
@@ -552,9 +566,18 @@ class Controls:
         from . import extension_push as ep
         btn = ({"text": "▶ Turn extension ON", "callback_data": "ext:on"} if ep.paused(self.bot.state)
                else {"text": "⏸ Pause extension (alerts only)", "callback_data": "ext:off"})
-        return {"inline_keyboard": [[btn]]}
+        cur = ep.qr_mode(self.bot.state)
+        modes = [{"text": ("✅ " if cur == k else "") + {"dm": "📷 QR in DM", "notify": "🔔 Pay manually", "off": "⛔ QR off"}[k],
+                  "callback_data": f"extqr:{k}"} for k in ("dm", "notify", "off")]
+        return {"inline_keyboard": [[btn], modes]}
 
     def _extension_state_text(self) -> str:
+        from . import extension_push as ep
+        m = ep.qr_mode(self.bot.state)
+        mode = f"\n💳 QR mode: <b>{ep.QR_MODES[m]}</b>" if m else "\n💳 QR mode: <b>set in each browser</b> (choose below to set all)"
+        return self._extension_pause_text() + mode
+
+    def _extension_pause_text(self) -> str:
         from . import extension_push as ep
         return ("⏸ <b>Extension paused.</b> Telegram alerts still go to everyone; the laptop "
                 "extension won't open tabs, click or send QRs. Tap ▶ to turn it on again."
@@ -564,6 +587,12 @@ class Controls:
     async def _set_extension_paused(self, client, paused: bool) -> None:
         from . import extension_push as ep
         self.bot.state.settings["ext_paused"] = paused
+        self.bot.state.save()
+        await ep.publish_control(client, self.bot.state)
+
+    async def _set_qr_mode(self, client, mode: str) -> None:
+        from . import extension_push as ep
+        self.bot.state.settings["ext_qr_mode"] = mode
         self.bot.state.save()
         await ep.publish_control(client, self.bot.state)
 
@@ -578,6 +607,12 @@ class Controls:
             await self._set_extension_paused(client, False)
             return self._extension_state_text()
         if sub == "status":
+            return self._extension_state_text()
+        if sub in ("qr", "mode"):
+            want = {"dm": "dm", "photo": "dm", "notify": "notify", "manual": "notify", "off": "off"}.get(args[1].lower() if len(args) > 1 else "")
+            if not want:
+                return "Usage: <code>/extension qr dm</code> · <code>/extension qr manual</code> · <code>/extension qr off</code>"
+            await self._set_qr_mode(client, want)
             return self._extension_state_text()
         if sub == "test" and ep.paused(self.bot.state):
             return "⏸ The extension is paused – tap ▶ below (or send /extension on) first."
@@ -601,6 +636,7 @@ class Controls:
                 "You'll get a ✅ message here.\n"
                 "5. Send <code>/extension test &lt;product link&gt;</code> to try it.\n\n"
                 "Pause/resume any time: the button below, or <code>/extension off</code> / <code>/extension on</code>.\n"
+                "QR mode for all browsers: the buttons below, or <code>/extension qr dm</code> · <code>manual</code> · <code>off</code>.\n"
                 "<i>⚠ The setup code contains your bot token – don't forward it. Delete this message after setup.</i>")
 
     async def _on_user_button(self, client, cq, cid, data) -> None:

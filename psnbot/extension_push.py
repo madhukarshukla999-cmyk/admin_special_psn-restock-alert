@@ -62,6 +62,15 @@ def paused(state) -> bool:
     return bool(state.settings.get("ext_paused"))
 
 
+QR_MODES = {"dm": "📷 Send QR in DM", "notify": "🔔 Pay manually (notification only)", "off": "⛔ Off (nothing to Telegram)"}
+
+
+def qr_mode(state) -> str:
+    """'' = never set from Telegram (each browser keeps its own Options choice)."""
+    m = state.settings.get("ext_qr_mode", "")
+    return m if m in QR_MODES else ""
+
+
 def setup_code(state, chat_id, token: str) -> str:
     """One code for the extension's setup screen: feed + owner chat + bot token (base64 JSON)."""
     import base64
@@ -72,6 +81,8 @@ def setup_code(state, chat_id, token: str) -> str:
 async def publish_control(client, state) -> bool:
     """Tell every connected extension whether it may act (paused = Telegram alerts only)."""
     payload = {"v": 1, "type": "control", "paused": paused(state), "ts": time.time()}
+    if qr_mode(state):
+        payload["qr_mode"] = qr_mode(state)
     try:
         r = await client.post(f"{server()}/{topic(state)}", content=json.dumps(payload).encode(),
                               headers={"Tags": "psnctl", "Title": "extension control"}, timeout=10)

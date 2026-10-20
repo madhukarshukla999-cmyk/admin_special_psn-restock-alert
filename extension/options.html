@@ -38,6 +38,17 @@
     <input type="number" id="maxPrice" min="0" step="100"></label>
 </fieldset>
 
+<fieldset><legend>Send QR to Telegram (GamesTheShop / Paytm)</legend>
+  <label><input type="checkbox" id="tgQr"> Send the payment QR to Telegram as a photo</label>
+  <label>Bot token (TELEGRAM_BOT_TOKEN from the bot's .env)
+    <input type="text" id="tgToken" placeholder="123456789:ABC…" autocomplete="off"></label>
+  <label>Chat ID (shown by <b>/extension</b>)
+    <input type="text" id="tgChatId" placeholder="123456789"></label>
+  <button id="allowShots" type="button">Allow screenshot fallback</button>
+  <small>Only needed if the QR can't be read directly: lets the extension screenshot the payment tab.</small><br>
+  <small>The token stays in this browser only. Anyone with it can control your bot – keep it private.</small>
+</fieldset>
+
 <button id="save">Save</button>
 <fieldset><legend>Test</legend>
   <label>Product link(s) – any in-stock GamesTheShop / Amazon product. Paste several (one per line) to test a multi-card restock.

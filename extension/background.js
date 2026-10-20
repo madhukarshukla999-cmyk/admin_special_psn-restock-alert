@@ -112,7 +112,8 @@ async function handleAlert(data) {
     // Always the product page: Amazon's cart-add link (cart_url) often lands on an empty cart.
     const tab = await chrome.tabs.create({ url: safeUrl(it.url), active: i === last,
                                            ...(win ? { windowId: win.id } : {}) });
-    if (clickThrough) await setJob(tab.id, { store: data.store, step: "start", started: Date.now() });
+    if (clickThrough) await setJob(tab.id, { store: data.store, step: "start", started: Date.now(),
+                                             title: it.title, storeName: data.store_name, test: !!data.test });
     opened.push(`${it.title}${clickThrough ? " (auto-click)" : ""}`);
   }
   if (win) chrome.windows.update(win.id, { focused: true, drawAttention: true, state: "normal" }).catch(() => {});
@@ -154,6 +155,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     })();
     return true;
   }
+  if (msg.type === "qr" && sender.tab) { sendQr(msg, sender.tab).then((ok) => reply(ok)); return true; }
   if (msg.type === "settings-changed") { ensureListener(); return; }
   if (msg.type === "test") {
     const urls = (msg.urls || [msg.url]).filter(Boolean);
@@ -161,3 +163,57 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       items: urls.map((u, i) => ({ id: "TEST" + i, title: urls.length > 1 ? `Test card ${i + 1}` : "Test alert", url: u })) });
   }
 });
+
+// ---- send the payment QR to Telegram (optional: bot token + chat ID in Options) ----
+async function dataUrlToBlob(u) { return (await fetch(u)).blob(); }
+
+async function screenshotCrop(tab, rect) {
+  // fallback when the QR image can't be read directly: bring the tab to front and screenshot it
+  await chrome.tabs.update(tab.id, { active: true });
+  await chrome.windows.update(tab.windowId, { focused: true });
+  await new Promise((r) => setTimeout(r, 500));
+  const shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  const blob = await dataUrlToBlob(shot);
+  if (!rect) return blob;
+  const bmp = await createImageBitmap(blob);
+  const pad = 16 * rect.dpr;
+  const x = Math.max(0, rect.x * rect.dpr - pad), y = Math.max(0, rect.y * rect.dpr - pad);
+  const w = Math.min(bmp.width - x, rect.w * rect.dpr + 2 * pad), h = Math.min(bmp.height - y, rect.h * rect.dpr + 2 * pad);
+  if (w < 50 || h < 50) return blob;
+  const c = new OffscreenCanvas(w, h);
+  c.getContext("2d").drawImage(bmp, x, y, w, h, 0, 0, w, h);
+  return c.convertToBlob({ type: "image/png" });
+}
+
+let qrChain = Promise.resolve();          // one at a time (screenshots need the tab in front)
+function sendQr(msg, tab) {
+  const run = qrChain.then(() => sendQrNow(msg, tab)).catch(async (e) => { await log(`QR → Telegram failed: ${e.message || e}`); return false; });
+  qrChain = run;
+  return run;
+}
+
+async function sendQrNow(msg, tab) {
+  const s = await chrome.storage.local.get({ tgQr: true, tgToken: "", tgChatId: "" });
+  if (!s.tgQr || !s.tgToken || !s.tgChatId) return false;
+  const job = (await getJobFor(tab.id)) || {};
+  let blob = null, how = "image";
+  if (msg.dataUrl) blob = await dataUrlToBlob(msg.dataUrl).catch(() => null);
+  if (!blob && msg.src) blob = await fetch(msg.src).then((r) => (r.ok ? r.blob() : null)).catch(() => null);
+  if (!blob || blob.size < 200) {
+    if (!(await chrome.permissions.contains({ origins: ["<all_urls>"] })))
+      throw new Error("couldn't read the QR image – in Options press 'Allow screenshot fallback'");
+    how = "screenshot"; blob = await screenshotCrop(tab, msg.rect);
+  }
+  const caption = `${job.test ? "TEST · " : ""}💳 ${job.storeName || "GamesTheShop"}: ${job.title || "PSN card"}\n` +
+    `Scan this QR with any UPI app and enter your PIN (it expires in a few minutes).\n` +
+    `On this phone: save the image, then in your UPI app use "Scan QR" → gallery.`;
+  const fd = new FormData();
+  fd.append("chat_id", s.tgChatId);
+  fd.append("caption", caption);
+  fd.append("photo", blob, "qr.png");
+  const r = await fetch(`https://api.telegram.org/bot${s.tgToken}/sendPhoto`, { method: "POST", body: fd });
+  const j = await r.json().catch(() => ({}));
+  if (!j.ok) throw new Error(j.description || `HTTP ${r.status}`);
+  await log(`QR sent to Telegram (${how}): ${job.title || ""}`);
+  return true;
+}

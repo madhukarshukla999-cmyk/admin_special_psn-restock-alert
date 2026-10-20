@@ -344,7 +344,7 @@ class Controls:
             text, kb = self.users_view()
             await send(text, reply_markup=kb)
         elif cmd == "/extension" and admin:
-            await send(await self._extension_command(client, args))
+            await send(await self._extension_command(client, args, cid))
         elif cmd == "/update" and admin:
             await send("⬆️ Checking for updates…")
             await self.bot.run_update(client, manual_cid=cid)
@@ -534,7 +534,7 @@ class Controls:
         return (f"📧 <b>Email alerts</b>\n{status}"
                 "Send <code>/email you@example.com</code> to get restock and sold-out alerts by email too.")
 
-    async def _extension_command(self, client, args: list[str]) -> str:
+    async def _extension_command(self, client, args: list[str], cid=None) -> str:
         from . import extension_push as ep
         from .models import Item
         if args and args[0].lower() == "test":
@@ -551,7 +551,10 @@ class Controls:
                 "3. Open the extension's <b>Options</b> and paste this connection code:\n"
                 f"<code>{html.escape(ep.topic(self.bot.state))}</code>\n"
                 "4. Log in to gamestheshop.com and amazon.in in that browser.\n"
-                "5. Send <code>/extension test</code> (or <code>/extension test &lt;product link&gt;</code>) to check it.\n\n"
+                "5. Send <code>/extension test</code> (or <code>/extension test &lt;product link&gt;</code>) to check it.\n"
+                "6. Optional – get the GamesTheShop payment QR here in Telegram: in Options, under "
+                "<b>Send QR to Telegram</b>, paste your bot token (TELEGRAM_BOT_TOKEN from .env) and this chat ID: "
+                f"<code>{html.escape(str(cid or ''))}</code>\n\n"
                 "<i>Keep the code private: anyone with it could see your alerts. "
                 "The extension only ever goes up to the payment page; you pay yourself.</i>")
 

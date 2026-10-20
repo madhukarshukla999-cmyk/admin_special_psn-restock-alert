@@ -339,9 +339,48 @@ async function paytm(job) {
   }, 15000);
   if (qr) {
     highlight(qr);
-    return step("qr", "Paytm: QR is ready – scan it with your UPI app and enter your PIN.", true);
+    const sent = await sendQrToTelegram(qr);
+    return step("qr", "Paytm: QR is ready – scan it with your UPI app and enter your PIN." +
+                      (sent ? " (also sent to Telegram)" : ""), true);
   }
   return step("pay", "Paytm: payment page open – choose how to pay.", true);
+}
+
+// The QR as a PNG data URL if we can read it here; otherwise its address or its position on
+// screen (the background then fetches it or takes a screenshot).
+async function qrImage(box) {
+  const els = [...box.querySelectorAll("canvas, img, svg")].filter((e) => {
+    const r = e.getBoundingClientRect(); return r.width >= 80 && r.height >= 80;
+  }).sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width);
+  const el = els[0];
+  if (!el) return {};
+  const r = el.getBoundingClientRect();
+  const out = { rect: window === window.top ? { x: r.left, y: r.top, w: r.width, h: r.height, dpr: devicePixelRatio } : null };
+  try {
+    if (el.tagName === "CANVAS") return { ...out, dataUrl: el.toDataURL("image/png") };
+    let src = el.tagName === "IMG" ? el.currentSrc || el.src : null;
+    if (el.tagName.toLowerCase() === "svg")
+      src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(el));
+    if (src && src.startsWith("data:image/png")) return { ...out, dataUrl: src };
+    if (src) {
+      // redraw on a white canvas → PNG (fails for cross-origin images; then the background fetches it)
+      const img = new Image(); img.crossOrigin = "anonymous";
+      await new Promise((ok, bad) => { img.onload = ok; img.onerror = bad; img.src = src; });
+      const size = Math.max(img.naturalWidth || 0, 400);
+      const c = document.createElement("canvas"); c.width = c.height = size + 40;
+      const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(img, 20, 20, size, size);
+      return { ...out, dataUrl: c.toDataURL("image/png") };
+    }
+  } catch { /* tainted canvas / blocked image */ }
+  return { ...out, src: el.tagName === "IMG" && /^https:/.test(el.src) ? el.src : null };
+}
+
+async function sendQrToTelegram(box) {
+  const o = await chrome.storage.local.get({ tgQr: true, tgToken: "", tgChatId: "" });
+  if (!o.tgQr || !o.tgToken || !o.tgChatId) return false;
+  await sleep(800);                        // let the QR finish drawing
+  return chrome.runtime.sendMessage({ type: "qr", ...(await qrImage(box)) }).catch(() => false);
 }
 
 async function getJob() {

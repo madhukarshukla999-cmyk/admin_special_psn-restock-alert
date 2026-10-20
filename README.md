@@ -64,6 +64,7 @@ Only run **one** copy per Telegram bot, so stop the PC task (`uninstall-autostar
 The `extension/` folder is a Chrome/Edge extension. When the bot finds a restock, it opens the card on your laptop **within about a second** and goes to checkout. **You always pay yourself**: it never places an order, and stops at the payment/OTP step.
 - **GamesTheShop:** opens the card, clicks **BUY NOW**, then **Pay Now**, so Paytm's QR is on screen to scan with your phone. Or set your UPI ID in the options and it sends the request to your UPI app instead; you only enter your PIN.
 - **Amazon:** opens the product page and clicks **Buy Now**. At checkout it picks **Scan and Pay with UPI**, clicks **Use this payment method**, then **Pay with UPI**, and highlights the QR. You scan it and enter your PIN. If there is no Buy Now button, it uses Add to Cart, then Proceed to Buy. You can turn off the UPI steps in Options.
+- **Several cards at once** (e.g. ₹1000, ₹2000, ₹3000, ₹4000): every card opens in its own tab. On GamesTheShop each tab goes on to checkout and the Paytm QR. On Amazon only the highest-value tab clicks through, because each Amazon UPI payment creates its own order; the others just open.
 - **Other stores:** just opens the page.
 
 Setup: send `/extension` to the bot (owner only) and follow the steps. In short: `chrome://extensions` → Developer mode → **Load unpacked** → pick `extension/`, then paste the connection code into the extension's Options. Use `/extension test <product link>` to check it.

@@ -19,10 +19,16 @@ async function settings() {
   return { ...DEFAULTS, ...s, stores: { ...DEFAULTS.stores, ...(s.stores || {}) } };
 }
 
-async function log(msg) {
-  const { logLines = [] } = await chrome.storage.local.get("logLines");
-  logLines.unshift(`${new Date().toLocaleTimeString()}  ${msg}`);
-  await chrome.storage.local.set({ logLines: logLines.slice(0, 30) });
+// one write at a time: several tabs finishing together must not overwrite each other's lines
+let logChain = Promise.resolve();
+function log(msg) {
+  const line = `${new Date().toLocaleTimeString()}  ${msg}`;
+  logChain = logChain.then(async () => {
+    const { logLines = [] } = await chrome.storage.local.get("logLines");
+    logLines.unshift(line);
+    await chrome.storage.local.set({ logLines: logLines.slice(0, 30) });
+  }).catch(() => {});
+  return logChain;
 }
 
 // ---- live connection to the bot's private ntfy topic (WebSocket) ----
@@ -94,51 +100,64 @@ async function handleAlert(data) {
   if (s.maxPrice > 0) items = items.filter((i) => !i.price || i.price <= s.maxPrice);
   if (!items.length) { await log(`Skipped ${data.store_name}: no allowed link / over price limit`); return; }
 
-  const it = items[items.length - 1];        // highest value first is usually what people want
-  const clickThrough = s.autoClick && auto;
-  // Always the product page: Amazon's cart-add link (cart_url) often lands on an empty cart,
-  // so the content script presses Buy Now on the product page instead.
-  const url = safeUrl(it.url);
-
+  // Open EVERY card in the alert (1k, 2k, 3k, 4k …), one tab each, lowest value first.
+  // GamesTheShop: every tab clicks through to checkout. Amazon: only the highest-value tab
+  // does (each Amazon "Pay with UPI" creates its own order); the others just open.
   const win = await chrome.windows.getLastFocused().catch(() => null);
-  const tab = await chrome.tabs.create({ url, active: true, ...(win ? { windowId: win.id } : {}) });
-  if (win) chrome.windows.update(win.id, { focused: true, drawAttention: true, state: "normal" }).catch(() => {});
-  if (clickThrough) {
-    const { jobs = {} } = await chrome.storage.session.get("jobs");
-    jobs[tab.id] = { store: data.store, step: "start", started: Date.now() };
-    await chrome.storage.session.set({ jobs });
+  const last = items.length - 1;
+  const opened = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const clickThrough = s.autoClick && auto && (data.store !== "amazon" || i === last);
+    // Always the product page: Amazon's cart-add link (cart_url) often lands on an empty cart.
+    const tab = await chrome.tabs.create({ url: safeUrl(it.url), active: i === last,
+                                           ...(win ? { windowId: win.id } : {}) });
+    if (clickThrough) await setJob(tab.id, { store: data.store, step: "start", started: Date.now() });
+    opened.push(`${it.title}${clickThrough ? " (auto-click)" : ""}`);
   }
+  if (win) chrome.windows.update(win.id, { focused: true, drawAttention: true, state: "normal" }).catch(() => {});
+  const anyAuto = s.autoClick && auto;
   chrome.notifications.create({
     type: "basic", iconUrl: "icon.png", priority: 2, requireInteraction: true, silent: !s.sound,
-    title: `🟢 ${data.test ? "TEST · " : ""}${data.store_name}: ${it.title}`,
-    message: clickThrough ? "Opening checkout… enter OTP/CVV to pay." : "Opened the page – buy quickly!",
+    title: `🟢 ${data.test ? "TEST · " : ""}${data.store_name}: ${items.length > 1 ? items.length + " cards" : items[0].title}`,
+    message: (items.length > 1 ? items.map((i) => i.title).join(", ") + "\n" : "") +
+             (anyAuto ? "Opening checkout… pay in each tab." : "Opened the page – buy quickly!"),
   });
-  await log(`${data.test ? "TEST " : ""}${data.store_name}: opened ${it.title}${clickThrough ? " (auto-click)" : ""}`);
+  await log(`${data.test ? "TEST " : ""}${data.store_name}: opened ${opened.join(" | ")}`);
 }
+
+// One storage key per tab, so several tabs can update their own job at the same time
+// without overwriting each other.
+const jobKey = (tabId) => "job_" + tabId;
+const setJob = (tabId, j) => chrome.storage.session.set({ [jobKey(tabId)]: j });
+const getJobFor = async (tabId) => (await chrome.storage.session.get(jobKey(tabId)))[jobKey(tabId)] || null;
 
 // ---- messages from content scripts (what to click) and the options page (test) ----
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === "job?" && sender.tab) {
-    chrome.storage.session.get("jobs").then(({ jobs = {} }) => {
-      const j = jobs[sender.tab.id];
+    getJobFor(sender.tab.id).then((j) => {
       reply(j && Date.now() - j.started < 5 * 60 * 1000 ? j : null);   // only tabs we opened, for 5 min
     });
     return true;
   }
   if (msg.type === "job-step" && sender.tab) {
-    chrome.storage.session.get("jobs").then(async ({ jobs = {} }) => {
-      if (msg.done) delete jobs[sender.tab.id]; else if (jobs[sender.tab.id]) jobs[sender.tab.id].step = msg.step;
-      await chrome.storage.session.set({ jobs });
+    (async () => {
+      const id = sender.tab.id, j = await getJobFor(id);
+      if (msg.done) await chrome.storage.session.remove(jobKey(id));
+      else if (j) await setJob(id, { ...j, step: msg.step });
       reply(true);                         // the content script waits for this before clicking
       if (msg.note) {
         await log(msg.note);
         if (msg.done) chrome.notifications.create({ type: "basic", iconUrl: "icon.png", priority: 2,
           title: "PSN Stock Bot", message: msg.note });
       }
-    });
+    })();
     return true;
   }
   if (msg.type === "settings-changed") { ensureListener(); return; }
-  if (msg.type === "test") { handleAlert({ test: true, ts: Date.now() / 1000, store: msg.store, store_name: "Test",
-    items: [{ id: "TEST", title: "Test alert", url: msg.url, cart_url: msg.cart_url || null }] }); }
+  if (msg.type === "test") {
+    const urls = (msg.urls || [msg.url]).filter(Boolean);
+    handleAlert({ test: true, ts: Date.now() / 1000, store: msg.store, store_name: "Test",
+      items: urls.map((u, i) => ({ id: "TEST" + i, title: urls.length > 1 ? `Test card ${i + 1}` : "Test alert", url: u })) });
+  }
 });

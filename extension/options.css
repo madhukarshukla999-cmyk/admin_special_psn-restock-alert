@@ -116,3 +116,5 @@ pre#log { margin: 0; max-height: 180px; overflow: auto; white-space: pre-wrap; f
 .seg span b { display: block; font-size: 12.5px; } .seg span small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
 .seg input:checked + span { border-color: var(--ps2); background: linear-gradient(180deg, #0b3a73, #0b1f45); box-shadow: 0 0 0 3px #2f8fff22; }
 input:disabled { opacity: .7; }
+
+.banner.bad { background: #3b0f14; border-color: #7f1d1d; color: #fecaca; }

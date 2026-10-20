@@ -6,7 +6,47 @@ becomes a pending request; an admin taps Allow/Deny. Each person has their own s
 """
 from __future__ import annotations
 
-PREFS = {"soldout": True, "summary": True}   # defaults
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
+PREFS = {"soldout": True, "summary": True, "weekly": True}   # defaults
+CARD_VALUES = [500, 1000, 1500, 2000, 2500, 3000, 4000, 5000]
+
+
+def hm(minutes: int) -> str:
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def parse_hm(raw: str) -> int | None:
+    """'23:30', '23.30', '2330', '23', '11pm', '7am' -> minutes after midnight."""
+    s = raw.strip().lower().replace(".", ":")
+    pm, am = s.endswith("pm"), s.endswith("am")
+    s = s[:-2].strip() if (pm or am) else s
+    if ":" in s:
+        h, _, m = s.partition(":")
+    elif len(s) in (3, 4) and s.isdigit():
+        h, m = s[:-2], s[-2:]
+    else:
+        h, m = s, "0"
+    if not (h.isdigit() and m.isdigit()):
+        return None
+    h, m = int(h), int(m)
+    if pm and h < 12:
+        h += 12
+    if am and h == 12:
+        h = 0
+    return h * 60 + m if 0 <= h < 24 and 0 <= m < 60 else None
+
+
+def rule_text(rule: dict | None) -> str:
+    rule = rule or {}
+    if rule.get("only"):
+        return "only " + ", ".join(f"₹{v:,}" for v in sorted(rule["only"]))
+    if rule.get("min"):
+        return f"₹{rule['min']:,} and above"
+    return "all values"
 
 
 class Users:
@@ -71,6 +111,72 @@ class Users:
                 continue
             out.append(cid)
         return out
+
+    # -- quiet hours -----------------------------------------------------
+    def quiet(self, cid) -> dict | None:
+        """{'start': min, 'end': min, 'allow': [store ids that still alert]} (IST), or None."""
+        q = (self.get(cid) or {}).get("quiet")
+        return q if q and q.get("on", True) else None
+
+    def set_quiet(self, cid, start: int | None, end: int | None = None) -> None:
+        rec = self.all[str(cid)]
+        old = rec.get("quiet") or {}
+        if start is None:
+            if old:
+                old["on"] = False          # keep times + exceptions for next time
+            return
+        rec["quiet"] = {"start": start, "end": end, "allow": old.get("allow", []), "on": True}
+
+    def toggle_quiet_allow(self, cid, store_id: str) -> bool:
+        q = self.all[str(cid)].setdefault("quiet", {"start": 23 * 60, "end": 7 * 60, "allow": [], "on": False})
+        allow = set(q.get("allow", []))
+        allow ^= {store_id}
+        q["allow"] = sorted(allow)
+        return store_id in allow
+
+    def in_quiet(self, cid, store_id: str | None = None, now: float | None = None) -> bool:
+        q = self.quiet(cid)
+        if not q:
+            return False
+        if store_id and store_id in q.get("allow", []):
+            return False
+        d = datetime.fromtimestamp(now or time.time(), IST)
+        m, s, e = d.hour * 60 + d.minute, q["start"], q["end"]
+        return s <= m < e if s < e else (m >= s or m < e)
+
+    def add_missed(self, cid, items) -> None:
+        rec = self.all[str(cid)]
+        lst = rec.setdefault("missed", [])
+        now = time.time()
+        for it in items:
+            lst.append({"key": it.key, "store": it.store, "title": it.title, "url": it.url,
+                        "price": it.price, "ts": now})
+        rec["missed"] = lst[-60:]
+
+    # -- card values -----------------------------------------------------
+    def value_rule(self, cid, store_id: str | None = None) -> dict:
+        vals = (self.get(cid) or {}).get("values") or {}
+        if store_id and store_id in vals:
+            return vals[store_id]
+        return vals.get("*") or {}
+
+    def has_store_rule(self, cid, store_id: str) -> bool:
+        return store_id in ((self.get(cid) or {}).get("values") or {})
+
+    def set_value_rule(self, cid, store_id: str, rule: dict | None) -> None:
+        vals = self.all[str(cid)].setdefault("values", {})
+        if rule is None:
+            vals.pop(store_id, None)
+        else:
+            vals[store_id] = rule
+
+    def wants_value(self, cid, store_id: str, denom) -> bool:
+        if not denom:
+            return True                       # unknown value: better to tell them
+        rule = self.value_rule(cid, store_id)
+        if rule.get("only"):
+            return int(denom) in rule["only"]
+        return int(denom) >= int(rule.get("min") or 0)
 
     # -- WhatsApp / email ------------------------------------------------
     def channel(self, cid, name: str) -> dict | None:

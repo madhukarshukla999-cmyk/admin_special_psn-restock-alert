@@ -29,6 +29,7 @@ from .telegram import Telegram
 from .users import Users
 from . import warp as warpmod
 from . import extension_push
+from . import report
 
 log = logging.getLogger("psnbot")
 IST = ZoneInfo("Asia/Kolkata")
@@ -172,23 +173,30 @@ class Bot:
 
     async def broadcast(self, client, text: str, *, store_id: str | None = None, pref: str | None = None,
                         admins_only: bool = False, subject: str | None = None,
-                        reply_markup: dict | None = None) -> None:
-        """Send to everyone who should get it. With `subject`, also WhatsApp + email (in the background)."""
+                        reply_markup: dict | None = None, only: list[str] | None = None) -> None:
+        """Send to everyone who should get it (or just `only`). With `subject`, also WhatsApp + email."""
         ids = self.users.recipients(store_id=store_id, pref=pref, admins_only=admins_only)
+        if only is not None:
+            ids = [i for i in ids if i in set(only)]
         if ids:
             await self.tg.send(client, text, chat_ids=ids, reply_markup=reply_markup)
         if subject and not admins_only:
-            task = asyncio.create_task(self._send_extra(client, text, subject, store_id, pref))
+            task = asyncio.create_task(self._send_extra(client, text, subject, store_id, pref, only))
             self._bg.add(task)
             task.add_done_callback(self._bg.discard)
 
-    async def _send_extra(self, client, text: str, subject: str, store_id, pref) -> None:
+    async def _send_extra(self, client, text: str, subject: str, store_id, pref, only=None) -> None:
         wa_text = f"{html_to_text(text, whatsapp=True)}"
+        keep = (lambda c: True) if only is None else (lambda c: c in set(only))
         for cid, ch in self.users.channel_recipients("whatsapp", store_id, pref):
+            if not keep(cid):
+                continue
             ok, detail = await send_whatsapp(client, ch["phone"], ch["apikey"], wa_text)
             await self._channel_result(client, cid, "whatsapp", ch, ok, detail)
             await asyncio.sleep(1.5)        # CallMeBot rate limit
         for cid, ch in self.users.channel_recipients("email", store_id, pref):
+            if not keep(cid):
+                continue
             ok, detail = await self.mailer.send(ch["address"], subject, text)
             await self._channel_result(client, cid, "email", ch, ok, detail)
 
@@ -498,21 +506,45 @@ class Bot:
                 task = asyncio.create_task(extension_push.publish(client, self.state, store_name, items))
                 self._bg.add(task)
                 task.add_done_callback(self._bg.discard)
-            body = "\n\n".join(_fmt_item(i) for i in items)
-            await self.broadcast(client, f"🟢 <b>PlayStation gift card back in stock on {store_name}!</b>\n"
-                                         f"<i>{_now()}</i>\n\n{body}\n\n👇 Tap to buy", store_id=items[0].store,
-                                 subject=f"🟢 PlayStation card back in stock on {store_name}",
-                                 reply_markup=buy_buttons(items, store_name))
+            sid = items[0].store
+            groups: dict[tuple, list] = {}      # same cards -> one message to several people
+            quieted = False
+            for cid in self.users.recipients(store_id=sid):
+                mine = [i for i in items if self.users.wants_value(cid, i.store, i.denomination)]
+                if not mine:
+                    continue                    # none of the values this person wants
+                if self.users.in_quiet(cid, sid):
+                    self.users.add_missed(cid, mine)   # told in the morning
+                    quieted = True
+                    continue
+                groups.setdefault(tuple(i.key for i in mine), [mine, []])[1].append(cid)
+            if quieted:
+                self.state.save()
+            for mine, cids in groups.values():
+                body = "\n\n".join(_fmt_item(i) for i in mine)
+                await self.broadcast(client, f"🟢 <b>PlayStation gift card back in stock on {store_name}!</b>\n"
+                                             f"<i>{_now()}</i>\n\n{body}\n\n👇 Tap to buy", store_id=sid,
+                                     subject=f"🟢 PlayStation card back in stock on {store_name}",
+                                     reply_markup=buy_buttons(mine, store_name), only=cids)
 
     async def _send_sold_out(self, client, sold_out: dict[str, list[tuple[Item, float | None]]]) -> None:
         for store_name, pairs in sold_out.items():
-            lines = []
-            for it, lasted in sorted(pairs, key=lambda p: _sort_key(p[0])):
-                extra = f" — was in stock for {hist.fmt_duration(lasted)}" if lasted is not None else ""
-                lines.append(f"• {html.escape(it.title)}{extra}")
-            await self.broadcast(client, f"🔴 <b>Sold out on {store_name}</b> · <i>{_now()}</i>\n" + "\n".join(lines),
-                                 store_id=pairs[0][0].store, pref="soldout",
-                                 subject=f"🔴 PlayStation card sold out on {store_name}")
+            sid = pairs[0][0].store
+            groups: dict[tuple, list] = {}
+            for cid in self.users.recipients(store_id=sid, pref="soldout"):
+                if self.users.in_quiet(cid, sid):
+                    continue                    # the morning message says how long they lasted
+                mine = [p for p in pairs if self.users.wants_value(cid, p[0].store, p[0].denomination)]
+                if mine:
+                    groups.setdefault(tuple(p[0].key for p in mine), [mine, []])[1].append(cid)
+            for mine, cids in groups.values():
+                lines = []
+                for it, lasted in sorted(mine, key=lambda p: _sort_key(p[0])):
+                    extra = f" — was in stock for {hist.fmt_duration(lasted)}" if lasted is not None else ""
+                    lines.append(f"• {html.escape(it.title)}{extra}")
+                await self.broadcast(client, f"🔴 <b>Sold out on {store_name}</b> · <i>{_now()}</i>\n" + "\n".join(lines),
+                                     store_id=sid, pref="soldout", only=cids,
+                                     subject=f"🔴 PlayStation card sold out on {store_name}")
 
     def _summary_for(self, cid: str) -> str | None:
         muted = self.users.muted(cid)
@@ -590,7 +622,32 @@ class Bot:
                 self.state.save()
                 for cid in self.users.recipients(pref="summary"):
                     await self.tg.send(client, self.daily_summary_text(cid), chat_ids=[cid])
+            if (self.state.seeded and now.weekday() == 6 and due <= now < due.replace(hour=min(23, hh + 3), minute=59)
+                    and self.state.settings.get("last_weekly") != today):
+                self.state.settings["last_weekly"] = today
+                self.state.save()
+                await extension_push.refresh_purchases(client, self.state)
+                for cid in self.users.recipients(pref="weekly"):
+                    await self.tg.send(client, report.weekly_text(self, cid), chat_ids=[cid])
             await _sleep(60, self._stop)
+
+    async def _quiet_digest_loop(self, client) -> None:
+        """When someone's quiet hours end, one message with everything they missed."""
+        while not self._stop.is_set():
+            for cid, rec in list(self.users.active().items()):
+                if rec.get("missed") and not self.users.in_quiet(cid):
+                    text = report.digest_text(self, cid, rec["missed"])
+                    rec["missed"] = []
+                    self.state.save()
+                    await self.tg.send(client, text, chat_ids=[cid])
+            await _sleep(60, self._stop)
+
+    async def _purchases_loop(self, client) -> None:
+        """Paid orders reported by the browser extension (kept for the weekly report)."""
+        while not self._stop.is_set():
+            if self.cfg.get("extension_push", True):
+                await extension_push.refresh_purchases(client, self.state)
+            await _sleep(600, self._stop)
 
     # -- "bot was down" -----------------------------------------------------
     async def _heartbeat_loop(self, client) -> None:
@@ -707,7 +764,9 @@ class Bot:
         async with make_client() as client:
             tasks = [guarded(self._scheduler, "Store checks"),
                      guarded(self._heartbeat_loop, "Heartbeat"),
-                     guarded(self._daily_summary_loop, "Daily summary")]
+                     guarded(self._daily_summary_loop, "Daily summary"),
+                     guarded(self._quiet_digest_loop, "Quiet-hours digest"),
+                     guarded(self._purchases_loop, "Purchases")]
             if not self.tg.dry_run and self.cfg.get("telegram_menu", True):
                 tasks.append(self.controls.run(client, stop))   # Telegram commands
             if self.auto_update:

@@ -350,6 +350,7 @@ async function qrResult(tab, msg) {
   chrome.alarms.clear(qrKey(tab.id));
   await tg("deleteMessage", { chat_id: q.chatId, message_id: q.msgId });   // QR no longer needed
   const ok = msg.result === "success";
+  if (ok) reportPurchase(q, msg).catch(() => {});        // for the bot's weekly report
   const text = [`${ok ? "✅" : "❌"} ${q.test ? "TEST · " : ""}${ok ? "PAYMENT SUCCESSFUL" : "Payment failed / cancelled"}`,
                 ...resultLines(q), ...(msg.order && !q.order ? [`🧾 Order: ${msg.order}`] : []),
                 ...(msg.line ? [`“${msg.line.slice(0, 120)}”`] : [])].join("\n");
@@ -455,4 +456,16 @@ async function revokeMe(all) {
   await log("🚫 Revoked from Telegram – disconnected. Paste a new setup code to connect again.");
   chrome.notifications.create({ type: "basic", iconUrl: "icon.png", priority: 2, title: "PSN Stock Bot",
     message: "This browser was disconnected from Telegram by the owner." });
+}
+
+// a successful payment → small event on the heartbeat feed; the bot keeps it for /week
+async function reportPurchase(q, msg) {
+  const s = await chrome.storage.local.get({ topic: "", server: "https://ntfy.sh", browserType: "", profileName: "", accountName: "" });
+  if (!s.topic) return;
+  const amount = Number(String(q.amount || "").replace(/[^\d.]/g, "")) || null;
+  const body = { v: 1, type: "buy", dev: await deviceId(), ts: Date.now() / 1000, test: !!q.test,
+    store: q.storeName, title: q.title, amount, order: msg.order || q.order || "",
+    account: s.accountName || q.account || "", profile: s.profileName, browser: s.browserType };
+  await fetch(`${s.server.replace(/\/+$/, "")}/${encodeURIComponent(s.topic)}-hb`,
+    { method: "POST", body: JSON.stringify(body), headers: { Tags: "psnbuy" } });
 }

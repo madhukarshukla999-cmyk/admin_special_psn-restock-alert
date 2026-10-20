@@ -52,7 +52,7 @@ async function connect() {
   const base = s.server.replace(/\/+$/, "").replace(/^http/, "ws");
   const since = lastMsg ? Math.max(lastMsg, Math.floor(Date.now() / 1000) - 120) : "2m";  // catch up after a drop
   ws = new WebSocket(`${base}/${encodeURIComponent(s.topic)}/ws?since=${since}`);
-  ws.onopen = () => setStatus("connected");
+  ws.onopen = () => { setStatus("connected"); syncControl(s).catch(() => {}); };
   ws.onclose = () => { setStatus("reconnecting"); setTimeout(ensureListener, 3000); };
   ws.onerror = () => {};
   ws.onmessage = (e) => {
@@ -62,6 +62,7 @@ async function connect() {
       if (ev.event !== "message") return;
       lastMsg = Math.max(lastMsg, ev.time || 0);
       const data = JSON.parse(ev.message);
+      if (data && data.v === 1 && data.type === "control") return applyControl(data, true);
       if (data && data.v === 1 && Date.now() / 1000 - (data.ts || 0) < 180) handleAlert(data);
     } catch { /* not one of ours */ }
   };
@@ -72,7 +73,11 @@ async function setStatus(status) {
 }
 
 chrome.runtime.onStartup.addListener(ensureListener);
-chrome.runtime.onInstalled.addListener(() => { chrome.alarms.create("keepalive", { periodInMinutes: 0.5 }); ensureListener(); });
+chrome.runtime.onInstalled.addListener((d) => {
+  chrome.alarms.create("keepalive", { periodInMinutes: 0.5 });
+  ensureListener();
+  if (d.reason === "install") chrome.runtime.openOptionsPage();     // straight to the setup screen
+});
 chrome.alarms.onAlarm.addListener(ensureListener);
 chrome.storage.onChanged.addListener((c) => { if (c.topic || c.enabled || c.server) ensureListener(); });
 ensureListener();
@@ -88,6 +93,8 @@ function safeUrl(u) {
 async function handleAlert(data) {
   const s = await settings();
   if (!s.enabled) return;
+  const { remotePaused } = await chrome.storage.local.get({ remotePaused: false });
+  if (remotePaused && !data.test) { await log(`Paused from Telegram – ignored ${data.store_name} alert`); return; }
   const key = data.store + ":" + (data.items || []).map((i) => i.id).join(",") + ":" + Math.floor((data.ts || 0) / 60);
   if (seen.has(key)) return;
   seen.add(key);
@@ -164,6 +171,16 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     return true;
   }
   if (msg.type === "qr-result" && sender.tab) { qrResult(sender.tab, msg).then((ok) => reply(ok)); return true; }
+  if (msg.type === "connected-report") {
+    (async () => {
+      const s = await settings();
+      await syncControl(s).catch(() => {});
+      const { remotePaused } = await chrome.storage.local.get({ remotePaused: false });
+      reply(await reportToOwner(remotePaused ? "✅ Extension connected – but PAUSED (send /extension on to start)"
+                                             : "✅ Extension connected and ON"));
+    })();
+    return true;
+  }
   if (msg.type === "settings-changed") { ensureListener(); return; }
   if (msg.type === "test") {
     const urls = (msg.urls || [msg.url]).filter(Boolean);
@@ -326,3 +343,40 @@ async function qrResult(tab, msg) {
   return true;
 }
 
+
+// ---- pause / resume from Telegram (/extension off|on or the button) ----
+// The latest control message is read from the feed on every (re)connect, so a browser that was
+// offline still picks up the current state.
+async function syncControl(s) {
+  const base = s.server.replace(/\/+$/, "");
+  const r = await fetch(`${base}/${encodeURIComponent(s.topic)}/json?poll=1&since=24h&tags=psnctl`);
+  const lines = (await r.text()).trim().split("\n").filter(Boolean);
+  for (const l of lines.reverse()) {
+    try { const d = JSON.parse(JSON.parse(l).message); if (d.type === "control") return applyControl(d, false); } catch { /* skip */ }
+  }
+}
+
+async function applyControl(d, live) {
+  const { remotePaused = false, setupDone = false } = await chrome.storage.local.get(["remotePaused", "setupDone"]);
+  const paused = !!d.paused;
+  if (paused === remotePaused) return;
+  await chrome.storage.local.set({ remotePaused: paused });
+  await log(paused ? "⏸ Paused from Telegram – Telegram alerts only" : "▶ Turned on from Telegram");
+  chrome.notifications.create({ type: "basic", iconUrl: "icon.png", priority: 1,
+    title: "PSN Stock Bot", message: paused ? "Paused from Telegram – this browser won't open or click anything." : "Turned on from Telegram – ready for restocks." });
+  if (live && setupDone) await reportToOwner(paused ? "⏸ Extension paused" : "▶ Extension ON and connected");
+}
+
+// short status message to the owner's chat, describing this browser
+async function reportToOwner(head) {
+  const s = await chrome.storage.local.get({ tgToken: "", tgChatId: "", browserType: "", profileName: "", accountName: "",
+                                             gtsMobile: "", gtsAccount: null, browserName: "" });
+  if (!s.tgToken || !s.tgChatId) return false;
+  const mobile = s.gtsMobile || (s.gtsAccount || {}).mobile || "";
+  const text = [head, `🌐 Browser: ${s.browserType || "?"}`, `🗂 Profile: ${s.profileName || "?"}`,
+                `👤 Account: ${s.accountName || (s.gtsAccount || {}).name || "?"}`,
+                `📱 Mobile: ${mobile ? "+91 " + mobile : "?"}`,
+                `v${chrome.runtime.getManifest().version} · ${new Date().toLocaleTimeString()}`].join("\n");
+  const j = await tg("sendMessage", { chat_id: s.tgChatId, text }).catch(() => ({ ok: false }));
+  return !!j.ok;
+}

@@ -493,7 +493,7 @@ class Bot:
     async def _send_restock(self, client, restocked: dict[str, list[Item]]) -> None:
         for store_name, items in restocked.items():
             items = sorted(items, key=_sort_key)
-            if self.cfg.get("extension_push", True) and not self.tg.dry_run:
+            if self.cfg.get("extension_push", True) and not self.tg.dry_run and not extension_push.paused(self.state):
                 # laptop extension first: it's the fastest path to checkout
                 task = asyncio.create_task(extension_push.publish(client, self.state, store_name, items))
                 self._bg.add(task)

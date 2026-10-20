@@ -68,7 +68,9 @@ The `extension/` folder is a Chrome/Edge extension. When the bot finds a restock
 - **QR to Telegram (optional):** on GamesTheShop, the Paytm payment QR is also sent to your Telegram chat as a photo, one per card. Set it up in Options → *Send QR to Telegram* with your bot token and the chat ID that `/extension` shows. Each photo says which browser/account it came from (the name you give the browser in Options) and the GamesTheShop mobile number, read from the signed-in account or typed in Options. The QR has a countdown (2 min by default) and is deleted from Telegram if not paid. A successful payment sends ✅ with a screenshot of the result page; a failed one sends ❌. These go only to the chat ID set in Options (the owner); everyone else only gets stock alerts.
 - **Other stores:** just opens the page.
 
-Setup: send `/extension` to the bot (owner only) and follow the steps. In short: `chrome://extensions` → Developer mode → **Load unpacked** → pick `extension/`, then paste the connection code into the extension's Options. Use `/extension test <product link>` to check it.
+Setup: send `/extension` to the bot (owner only). Load the `extension/` folder (`chrome://extensions` → Developer mode → **Load unpacked**); its setup screen opens by itself. Paste the **setup code** from `/extension`, fill in what it couldn't detect (browser, profile, account name, mobile) and press **Connect**. You get a ✅ message in Telegram. Use `/extension test <product link>` to check it.
+
+**Pause from Telegram:** `/extension off` (or the ⏸ button under `/extension`) stops every connected browser from opening or clicking anything, and Telegram alerts keep going to everyone. `/extension on` (▶) starts them again; each browser confirms in Telegram. A browser that was offline picks up the current state when it reconnects.
 
 The bot sends restocks to a private, random [ntfy.sh](https://ntfy.sh) topic, and the extension listens there (free, no account). It only opens links on known store sites, and only clicks in tabs it opened itself. Its options include a price limit, per-store switches and an auto-click switch. Turn the push off with `extension_push: false`.
 

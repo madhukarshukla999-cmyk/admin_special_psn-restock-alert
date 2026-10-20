@@ -344,7 +344,8 @@ class Controls:
             text, kb = self.users_view()
             await send(text, reply_markup=kb)
         elif cmd == "/extension" and admin:
-            await send(await self._extension_command(client, args))
+            text = await self._extension_command(client, args, cid)
+            await send(text, reply_markup=self._extension_markup())
         elif cmd == "/update" and admin:
             await send("⬆️ Checking for updates…")
             await self.bot.run_update(client, manual_cid=cid)
@@ -366,6 +367,19 @@ class Controls:
             return
         if data.startswith("cy:"):
             await self._on_cycle_button(client, cq, cid, data)
+            return
+        if data in ("ext:on", "ext:off"):
+            if not self.users.is_admin(cid):
+                await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
+                return
+            await self._set_extension_paused(client, data == "ext:off")
+            await self.tg.answer_callback(client, cq["id"], "Extension paused ⏸" if data == "ext:off" else "Extension on ▶")
+            try:   # keep the message (it may hold the setup code); just swap the button
+                await self.tg.api(client, "editMessageReplyMarkup", {"chat_id": cid, "message_id": msg.get("message_id"),
+                                                                      "reply_markup": self._extension_markup()})
+            except Exception:  # noqa: BLE001
+                pass
+            await self.tg.send(client, self._extension_state_text(), chat_ids=[cid])
             return
 
         ids = {s.id: s.name for s in self.bot.stores}
@@ -534,9 +548,39 @@ class Controls:
         return (f"📧 <b>Email alerts</b>\n{status}"
                 "Send <code>/email you@example.com</code> to get restock and sold-out alerts by email too.")
 
-    async def _extension_command(self, client, args: list[str]) -> str:
+    def _extension_markup(self) -> dict:
+        from . import extension_push as ep
+        btn = ({"text": "▶ Turn extension ON", "callback_data": "ext:on"} if ep.paused(self.bot.state)
+               else {"text": "⏸ Pause extension (alerts only)", "callback_data": "ext:off"})
+        return {"inline_keyboard": [[btn]]}
+
+    def _extension_state_text(self) -> str:
+        from . import extension_push as ep
+        return ("⏸ <b>Extension paused.</b> Telegram alerts still go to everyone; the laptop "
+                "extension won't open tabs, click or send QRs. Tap ▶ to turn it on again."
+                if ep.paused(self.bot.state) else
+                "▶ <b>Extension ON.</b> Connected browsers open restocks and go to checkout.")
+
+    async def _set_extension_paused(self, client, paused: bool) -> None:
+        from . import extension_push as ep
+        self.bot.state.settings["ext_paused"] = paused
+        self.bot.state.save()
+        await ep.publish_control(client, self.bot.state)
+
+    async def _extension_command(self, client, args: list[str], cid=None) -> str:
         from . import extension_push as ep
         from .models import Item
+        sub = args[0].lower() if args else ""
+        if sub in ("off", "pause", "stop"):
+            await self._set_extension_paused(client, True)
+            return self._extension_state_text()
+        if sub in ("on", "resume", "start"):
+            await self._set_extension_paused(client, False)
+            return self._extension_state_text()
+        if sub == "status":
+            return self._extension_state_text()
+        if sub == "test" and ep.paused(self.bot.state):
+            return "⏸ The extension is paused – tap ▶ below (or send /extension on) first."
         if args and args[0].lower() == "test":
             url = args[1] if len(args) > 1 and args[1].startswith("https://") else "https://www.gamestheshop.com/"
             store = ("amazon" if "amazon." in url else "gamestheshop" if "gamestheshop" in url
@@ -544,16 +588,20 @@ class Controls:
             ok = await ep.publish(client, self.bot.state, "Test", [Item(store, "TEST", "Test alert", url, True)], test=True)
             return ("✅ Test sent. Your laptop browser should open the page within a few seconds."
                     if ok else "❌ Couldn't reach ntfy.sh; check /health later.")
-        return ("💻 <b>Laptop browser extension</b>\n\n"
-                "1. Download the code from GitHub (green <b>Code</b> button → Download ZIP) and unzip it.\n"
-                "2. In Chrome open <code>chrome://extensions</code>, turn on <b>Developer mode</b>, click "
-                "<b>Load unpacked</b> and pick the <code>extension</code> folder.\n"
-                "3. Open the extension's <b>Options</b> and paste this connection code:\n"
-                f"<code>{html.escape(ep.topic(self.bot.state))}</code>\n"
-                "4. Log in to gamestheshop.com and amazon.in in that browser.\n"
-                "5. Send <code>/extension test</code> (or <code>/extension test &lt;product link&gt;</code>) to check it.\n\n"
-                "<i>Keep the code private: anyone with it could see your alerts. "
-                "The extension only ever goes up to the payment page; you pay yourself.</i>")
+        import os
+        code = ep.setup_code(self.bot.state, cid or "", getattr(self.tg, "token", "") or os.environ.get("TELEGRAM_BOT_TOKEN", ""))
+        return ("💻 <b>Laptop browser extension</b>\n"
+                f"{self._extension_state_text()}\n\n"
+                "1. Download the code from GitHub (green <b>Code</b> → Download ZIP) and unzip it.\n"
+                "2. Open <code>chrome://extensions</code> (or brave://, edge://), turn on <b>Developer mode</b>, "
+                "<b>Load unpacked</b> → pick the <code>extension</code> folder. Its setup page opens by itself.\n"
+                "3. Paste this <b>setup code</b> there (tap to copy):\n"
+                f"<tg-spoiler><code>{html.escape(code)}</code></tg-spoiler>\n"
+                "4. Fill in what it asks (browser, profile, account name, mobile) and press <b>Connect</b>. "
+                "You'll get a ✅ message here.\n"
+                "5. Send <code>/extension test &lt;product link&gt;</code> to try it.\n\n"
+                "Pause/resume any time: the button below, or <code>/extension off</code> / <code>/extension on</code>.\n"
+                "<i>⚠ The setup code contains your bot token – don't forward it. Delete this message after setup.</i>")
 
     async def _on_user_button(self, client, cq, cid, data) -> None:
         if not self.users.is_admin(cid):

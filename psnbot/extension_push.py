@@ -56,3 +56,26 @@ async def publish(client, state, store_name: str, items: list, test: bool = Fals
     except Exception as e:  # noqa: BLE001 - never block alerts
         log.warning("Extension push failed: %r", e)
         return False
+
+
+def paused(state) -> bool:
+    return bool(state.settings.get("ext_paused"))
+
+
+def setup_code(state, chat_id, token: str) -> str:
+    """One code for the extension's setup screen: feed + owner chat + bot token (base64 JSON)."""
+    import base64
+    raw = json.dumps({"v": 1, "s": server(), "t": topic(state), "c": str(chat_id), "k": token}, separators=(",", ":"))
+    return "psnbot1:" + base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+async def publish_control(client, state) -> bool:
+    """Tell every connected extension whether it may act (paused = Telegram alerts only)."""
+    payload = {"v": 1, "type": "control", "paused": paused(state), "ts": time.time()}
+    try:
+        r = await client.post(f"{server()}/{topic(state)}", content=json.dumps(payload).encode(),
+                              headers={"Tags": "psnctl", "Title": "extension control"}, timeout=10)
+        return r.status_code < 300
+    except Exception as e:  # noqa: BLE001
+        log.warning("Extension control push failed: %r", e)
+        return False

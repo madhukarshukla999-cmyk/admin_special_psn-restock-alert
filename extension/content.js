@@ -137,13 +137,23 @@ const amzChangePayment = () => {
 };
 
 // a square image/canvas of QR size, near text that mentions scanning / QR / UPI
-function highlightQr() {
-  const qr = [...document.querySelectorAll("img, canvas, svg")].find((e) => {
+function findQrEl() {
+  return [...document.querySelectorAll("img, canvas, svg")].find((e) => {
     const r = e.getBoundingClientRect();
     return r.width >= 120 && Math.abs(r.width - r.height) < r.width * 0.15 && /scan|qr|upi/i.test(boxText(e));
-  });
+  }) || null;
+}
+function highlightQr() {
+  const qr = findQrEl();
   if (qr) highlight(qr.parentElement || qr);
   return !!qr;
+}
+// Amazon: QR is on screen → send it to Telegram (DM / notify mode) and watch for the result
+async function amazonQrReady() {
+  const el = findQrEl();
+  const sent = el ? await sendQrToTelegram(el.parentElement || el) : false;
+  if (sent) watchPayment(false);
+  return step("qr", "Amazon: QR is ready – scan it with your UPI app and enter your PIN." + (sent ? " (Telegram notified)" : ""), true);
 }
 
 // A click like a real mouse: some pages only react to pointer/mouse down+up, not a bare click().
@@ -212,8 +222,8 @@ async function amazonCheckout(job) {
   if (!o.amazonUpiQr) return step("checkout", manual, true);
   if (job.step === "paid") {                            // after "Pay with UPI": the QR page
     const ok = await find(() => highlightQr(), 15000);
-    return step("qr", ok ? "Amazon: QR is ready – scan it with your UPI app and enter your PIN."
-                         : "Amazon: UPI payment page open – scan the QR and enter your PIN.", true);
+    if (ok) return amazonQrReady();
+    return step("qr", "Amazon: UPI payment page open – scan the QR and enter your PIN.", true);
   }
 
   // 1) payment-method page: choose "Scan and Pay with UPI", then "Use this payment method"
@@ -230,7 +240,7 @@ async function amazonCheckout(job) {
     await step("paid", "Amazon: review page – clicking 'Pay with UPI'…");
     realClick(amzPayWithUpi());    // order waits for your UPI payment; nothing is paid until you scan + PIN
     if (await find(() => !amzPayWithUpi() && highlightQr(), 15000))      // QR shown on the same page
-      return step("qr", "Amazon: QR is ready – scan it with your UPI app and enter your PIN.", true);
+      return amazonQrReady();
     return;
   }
   if (what === "frame") {
@@ -339,9 +349,133 @@ async function paytm(job) {
   }, 15000);
   if (qr) {
     highlight(qr);
-    return step("qr", "Paytm: QR is ready – scan it with your UPI app and enter your PIN.", true);
+    const sent = await sendQrToTelegram(qr);
+    await step("qr", "Paytm: QR is ready – scan it with your UPI app and enter your PIN." +
+                     (sent ? " (also sent to Telegram)" : ""), true);
+    if (sent) watchPayment(false);          // this page shows the QR: only NEW success text counts
+    return;
   }
   return step("pay", "Paytm: payment page open – choose how to pay.", true);
+}
+
+// The QR as a PNG data URL if we can read it here; otherwise its address or its position on
+// screen (the background then fetches it or takes a screenshot).
+async function qrImage(box) {
+  const els = [...box.querySelectorAll("canvas, img, svg")].filter((e) => {
+    const r = e.getBoundingClientRect(); return r.width >= 80 && r.height >= 80;
+  }).sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width);
+  const el = els[0];
+  if (!el) return {};
+  const r = el.getBoundingClientRect();
+  const out = { rect: window === window.top ? { x: r.left, y: r.top, w: r.width, h: r.height, dpr: devicePixelRatio } : null };
+  try {
+    if (el.tagName === "CANVAS") return { ...out, dataUrl: el.toDataURL("image/png") };
+    let src = el.tagName === "IMG" ? el.currentSrc || el.src : null;
+    if (el.tagName.toLowerCase() === "svg")
+      src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(el));
+    if (src && src.startsWith("data:image/png")) return { ...out, dataUrl: src };
+    if (src) {
+      // redraw on a white canvas → PNG (fails for cross-origin images; then the background fetches it)
+      const img = new Image(); img.crossOrigin = "anonymous";
+      await new Promise((ok, bad) => { img.onload = ok; img.onerror = bad; img.src = src; });
+      const size = Math.max(img.naturalWidth || 0, 400);
+      const c = document.createElement("canvas"); c.width = c.height = size + 40;
+      const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(img, 20, 20, size, size);
+      return { ...out, dataUrl: c.toDataURL("image/png") };
+    }
+  } catch { /* tainted canvas / blocked image */ }
+  return { ...out, src: el.tagName === "IMG" && /^https:/.test(el.src) ? el.src : null };
+}
+
+async function sendQrToTelegram(box) {
+  const o = await chrome.storage.local.get({ tgQr: true, tgToken: "", tgChatId: "" });
+  if (!o.tgQr || !o.tgToken || !o.tgChatId) return false;
+  const { qrMode = "dm" } = await chrome.storage.local.get("qrMode");
+  await sleep(800);                        // let the QR finish drawing
+  const img = qrMode === "notify" ? {} : await qrImage(box);
+  return chrome.runtime.sendMessage({ type: "qr", ...img, ...paytmDetails() }).catch(() => false);
+}
+
+// ---- which GamesTheShop account is signed in (read from the site's own localStorage) ----
+function jwtPayload(tok) {
+  try { return JSON.parse(atob(tok.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))); } catch { return null; }
+}
+function findMobile(obj, depth = 0) {
+  if (!obj || depth > 4) return "";
+  const norm = (v) => { const d = String(v).replace(/\D/g, "").replace(/^0+/, ""); const m = d.match(/^(?:91)?([6-9]\d{9})$/); return m ? m[1] : ""; };
+  for (const [k, v] of Object.entries(obj))
+    if (/phone|mobile|contact_?no|msisdn/i.test(k) && (typeof v === "string" || typeof v === "number") && norm(v)) return norm(v);
+  for (const v of Object.values(obj))
+    if (v && typeof v === "object") { const m = findMobile(v, depth + 1); if (m) return m; }
+  return "";
+}
+async function detectGtsAccount() {
+  if (location.hostname !== "www.gamestheshop.com" || window !== window.top) return;
+  let user = null;
+  try { user = JSON.parse(localStorage.getItem("user") || "null"); } catch { /* ignore */ }
+  const tok = localStorage.getItem("accessToken");
+  const jwt = tok ? jwtPayload(tok) : null;
+  if (!user && !jwt) return;                       // not signed in here
+  const acc = {
+    mobile: findMobile(user) || findMobile(jwt),
+    name: (user && (user.display_name || user.name || [user.first_name, user.last_name].filter(Boolean).join(" "))) || (jwt && jwt.name) || "",
+    email: (user && (user.email || user.contact_email)) || (jwt && (jwt.email || jwt.contact_email)) || "",
+    id: String((user && user.id) || (jwt && (jwt.user_id || jwt.id || jwt.sub)) || ""),
+  };
+  const { gtsAccount } = await chrome.storage.local.get("gtsAccount");
+  if (JSON.stringify(gtsAccount || {}) !== JSON.stringify(acc)) await chrome.storage.local.set({ gtsAccount: acc });
+}
+
+async function detectAmazonAccount() {
+  if (location.hostname !== "www.amazon.in" || window !== window.top) return;
+  const el = document.querySelector("#nav-link-accountList-nav-line-1, #nav-greeting-name, .nav-line-1-container .nav-line-1");
+  const m = ((el && el.innerText) || "").match(/hello,?\s*(.+)/i);
+  const name = m ? m[1].trim() : "";
+  if (!name || /sign in/i.test(name)) return;
+  const { amzAccount } = await chrome.storage.local.get("amzAccount");
+  if (!amzAccount || amzAccount.name !== name) await chrome.storage.local.set({ amzAccount: { name } });
+}
+
+// order id / amount shown on the Paytm page, for the Telegram caption
+function paytmDetails() {
+  const txt = document.body.innerText || "";
+  const order = (txt.match(/order\s*(?:id|no\.?|number)\s*[:#]?\s*([A-Za-z0-9_\-]{6,})/i) || [])[1] || "";
+  const amount = (txt.match(/₹\s?([\d,]+(?:\.\d{1,2})?)/) || [])[1] || "";
+  return { order, amount };
+}
+
+// ---- after the QR: watch this tab for "payment successful" / "failed" (Paytm page or the shop's
+// order page it redirects to) and tell the background, which updates Telegram.
+const PAY_OK = /payment (was |is |has been )?success(ful)?|transaction success(ful)?|paid successfully|payment (received|completed|done)|order (has been |was )?(placed|confirmed|successful)|thank you for (your )?(order|purchase|shopping)/i;
+const PAY_FAIL = /payment (has |was )?(failed|declined|cancell?ed|unsuccessful)|transaction (failed|declined|cancell?ed)|order (failed|cancell?ed)/i;
+let watching = false;
+// short visible texts on the page that match (a heading / message, not a whole paragraph of FAQ)
+function payLines(re) {
+  return [...document.querySelectorAll("h1, h2, h3, h4, h5, p, div, span, strong, b")]
+    .filter((e) => e.offsetParent !== null && e.children.length < 4)
+    .map((e) => (e.innerText || "").trim()).filter((x) => x.length < 140 && re.test(x));
+}
+async function watchPayment(baselineOk) {
+  if (watching) return;
+  watching = true;
+  // on the QR page itself, ignore texts already there (e.g. an FAQ "what if my payment failed?")
+  const base = baselineOk ? new Set() : new Set([...payLines(PAY_OK), ...payLines(PAY_FAIL)]);
+  const end = Date.now() + 10 * 60 * 1000;
+  while (Date.now() < end) {
+    const ok = payLines(PAY_OK).filter((x) => !base.has(x)), fail = payLines(PAY_FAIL).filter((x) => !base.has(x));
+    if (ok.length || fail.length) {
+      await sleep(800);
+      const txt = document.body.innerText || "";
+      const line = (ok.length ? ok : fail).sort((a, b) => a.length - b.length)[0];
+      const order = (txt.match(/order\s*(?:id|no\.?|number)\s*[:#]?\s*([A-Za-z0-9_\-]{6,})/i) || [])[1] || "";
+      await chrome.runtime.sendMessage({ type: "qr-result", result: ok.length ? "success" : "failed", line, order }).catch(() => {});
+      return;
+    }
+    const still = await chrome.runtime.sendMessage({ type: "watch?" }).catch(() => null);
+    if (!still) return;                    // expired or already reported
+    await sleep(1000);
+  }
 }
 
 async function getJob() {
@@ -356,6 +490,11 @@ async function getJob() {
 
 (async () => {
   const host = location.hostname;
+  detectGtsAccount().catch(() => {});
+  detectAmazonAccount().catch(() => {});
+  if (window === window.top) {             // a tab whose QR is still waiting: watch it for the result
+    chrome.runtime.sendMessage({ type: "watch?" }).then((w) => { if (w) watchPayment(true); }).catch(() => {});
+  }
   const isPaytm = host.endsWith("paytmpayments.com") || host.endsWith("paytm.in");
   const isAmazon = host === "amazon.in" || host.endsWith(".amazon.in");
   if (window !== window.top) {
@@ -375,6 +514,7 @@ async function getJob() {
     while (!moved() && Date.now() < end) await sleep(200);
     if (!moved()) return;
     await sleep(300);                                // let the new page render
+    detectGtsAccount().catch(() => {});
     job = await chrome.runtime.sendMessage({ type: "job?" }).catch(() => null);
     if (!job) return;                                // finished (or expired)
   }

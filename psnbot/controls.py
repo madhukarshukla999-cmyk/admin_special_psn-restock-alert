@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 COMMANDS = [
     {"command": "menu", "description": "My alerts: stores, card values, quiet hours"},
     {"command": "panel", "description": "(owner) Control panel"},
+    {"command": "groups", "description": "(owner) Post alerts to a group / channel"},
     {"command": "week", "description": "Weekly report"},
     {"command": "quiet", "description": "Quiet hours, e.g. /quiet 23:00 07:00"},
     {"command": "status", "description": "What's in stock right now"},
@@ -253,6 +254,7 @@ class Controls:
                  f" · <b>{len(online)}</b> browser{'s' if len(online) != 1 else ''} online",
                  f"⏱ Check speed: " + (f"<b>⚡ burst now</b> ({', '.join(bursting)})" if bursting else "normal"),
                  f"🌙 Your quiet hours: <b>{self._quiet_short(cid)}</b> · 💳 Your cards: <b>{self._values_short(cid, 30)}</b>",
+                 f"📢 Groups: <b>{len(b.groups.all)}</b> connected" if b.groups.all else "📢 Groups: none connected",
                  "", "Tap a button – everything changes right here."]
         cur = mode or ""
         rows = [
@@ -262,8 +264,9 @@ class Controls:
              for k, lbl in (("dm", "📷 QR in DM"), ("notify", "🔔 Pay manually"), ("off", "⛔ QR off"))],
             [{"text": "⏱ Check speed", "callback_data": "cy:list"}, {"text": "🏪 Stores & my alerts", "callback_data": "refresh"}],
             [{"text": "🌙 Quiet hours", "callback_data": "qh:pn:home"}, {"text": "💳 Card values", "callback_data": "cv:pn:home"}],
-            [{"text": "📊 Weekly report", "callback_data": "wk:pn"}, {"text": "🔎 Check all now", "callback_data": "pn:check"},
-             {"text": "🔄 Refresh", "callback_data": "pn:home"}],
+            [{"text": f"📢 Groups ({len(b.groups.all)})", "callback_data": "gr:list"},
+             {"text": "📊 Weekly report", "callback_data": "wk:pn"}],
+            [{"text": "🔎 Check all now", "callback_data": "pn:check"}, {"text": "🔄 Refresh", "callback_data": "pn:home"}],
         ]
         return "\n".join(lines), {"inline_keyboard": rows}
 
@@ -426,7 +429,8 @@ class Controls:
             "/health: is every store being checked OK\n"
             "/cycles: how often each store is checked\n"
             "/whatsapp, /email: get alerts there too (on/off any time)\n\n"
-            "Owner only: <b>/panel</b> (everything in one place), /users, /update, /extension, changing /cycles\n\n"
+            "Owner only: <b>/panel</b> (everything in one place), <b>/groups</b> (post alerts to a group or channel), "
+            "/users, /update, /extension, changing /cycles\n\n"
             "Turning a store off only stops its messages; it's still checked in the background.")
 
     # -- handling --------------------------------------------------------
@@ -434,9 +438,16 @@ class Controls:
         if "callback_query" in upd:
             await self._on_button(client, upd["callback_query"])
             return
+        if "my_chat_member" in upd:                      # added to / removed from a group or channel
+            await self.bot.groups.on_member_update(client, upd["my_chat_member"])
+            return
         msg = upd.get("message") or {}
         chat = msg.get("chat") or {}
         cid = chat.get("id")
+        if chat.get("type") in ("group", "supergroup", "channel"):
+            if msg.get("migrate_to_chat_id"):            # group upgraded to a supergroup
+                await self.bot.groups.migrate(str(cid), str(msg["migrate_to_chat_id"]))
+            return                                       # groups only receive posts; commands are for DMs
         text = (msg.get("text") or "").strip()
         if not cid or not text.startswith("/"):
             return
@@ -466,6 +477,9 @@ class Controls:
         admin = self.users.is_admin(cid)
         if cmd in ("/menu", "/start", "/settings", "/notifications"):
             await send(self.menu_text(cid), reply_markup=self.menu_markup(cid))
+        elif cmd in ("/groups", "/group", "/channels") and admin:
+            text, kb = await self.bot.groups.list_view(client)
+            await send(text, reply_markup=kb)
         elif cmd in ("/panel", "/dashboard", "/owner") and admin:
             text, kb = await self.panel_view(client, cid)
             await send(text, reply_markup=kb)
@@ -521,7 +535,7 @@ class Controls:
             await self.bot.run_update(client, manual_cid=cid)
         elif cmd == "/help":
             await send(self.HELP)
-        elif cmd in ("/users", "/update", "/extension", "/panel", "/dashboard", "/owner"):
+        elif cmd in ("/users", "/update", "/extension", "/panel", "/dashboard", "/owner", "/groups", "/group", "/channels"):
             await send("Only the owner can use that.")
 
     async def _on_button(self, client, cq: dict) -> None:
@@ -546,6 +560,12 @@ class Controls:
                 await ep.refresh_purchases(client, self.bot.state)
             back = self._back_row("pn" if data == "wk:pn" else "mn")
             await self.tg.edit(client, cid, mid, report.weekly_text(self.bot, cid), {"inline_keyboard": [back]})
+            return
+        if data.startswith("gr:"):
+            if not self.users.is_admin(cid):
+                await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
+                return
+            await self.bot.groups.on_button(client, cq, cid, mid, data)
             return
         if data.startswith("pn:"):
             if not self.users.is_admin(cid):
@@ -1024,7 +1044,7 @@ class Controls:
         offset = self.bot.state.settings.get("tg_offset")
         while not stop.is_set():
             try:
-                payload = {"timeout": 50, "allowed_updates": ["message", "callback_query"]}
+                payload = {"timeout": 50, "allowed_updates": ["message", "callback_query", "my_chat_member"]}
                 if offset:
                     payload["offset"] = offset
                 updates = await self.tg.api(client, "getUpdates", payload, timeout=65)

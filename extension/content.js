@@ -9,18 +9,44 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let href = location.href;
 const moved = () => location.href !== href;
 
-async function find(test, timeoutMs = 15000) {
-  const end = Date.now() + timeoutMs;
-  while (Date.now() < end && !moved()) {
-    const el = test();
-    if (el) return el;
-    await sleep(250);
+// Wait for test() to return something: re-checked on every page change (MutationObserver) and
+// every 100 ms, so a button is clicked the moment it appears.
+function find(test, timeoutMs = 15000) {
+  const safe = () => { try { return test(); } catch { return null; } };
+  const first = safe();
+  if (first) return Promise.resolve(first);
+  return new Promise((resolve) => {
+    let done = false, obs = null, timer = null;
+    const finish = (v) => { if (done) return; done = true; if (obs) obs.disconnect(); clearInterval(timer); resolve(v); };
+    const end = Date.now() + timeoutMs;
+    const check = () => {
+      if (done) return;
+      if (moved() || Date.now() > end) return finish(null);
+      const v = safe(); if (v) finish(v);
+    };
+    try { obs = new MutationObserver(check); obs.observe(document.documentElement || document, { childList: true, subtree: true, attributes: true }); } catch { /* ignore */ }
+    timer = setInterval(check, 100);
+  });
+}
+
+// Click, and click again if the page wasn't ready yet (React not hydrated → nothing happened).
+// (never clicks again once the page has started leaving – no double orders)
+let leaving = false;
+addEventListener("beforeunload", () => { leaving = true; });
+addEventListener("pagehide", () => { leaving = true; });
+async function clickUntil(getBtn, left, tries = 8) {
+  for (let i = 0; i < tries; i++) {
+    if (leaving || moved()) return true;
+    const b = getBtn();
+    if (!b) return true;                       // button gone = it worked
+    b.click();
+    if (await find(() => leaving || left(), 250)) return true;   // page changed / moved on
   }
-  return null;
+  return leaving || moved();
 }
 
 const byText = (re, sel = "button, input[type=submit], a") => () =>
-  [...document.querySelectorAll(sel)].find((e) => {
+  document.body && [...document.querySelectorAll(sel)].find((e) => {
     const t = (e.innerText || e.value || "").trim();
     return re.test(t) && !e.disabled && e.offsetParent !== null;
   });
@@ -41,19 +67,19 @@ async function gamestheshop(job) {
       return step("checkout", "GamesTheShop: checkout open – tap Pay Now and pay.", true);
     const btn = await find(byText(/^pay now$/i));
     if (!btn) return step("checkout", "GamesTheShop: checkout open but 'Pay Now' not found – tap it yourself.", true);
-    await step("paynow");
-    btn.click();                     // only opens Paytm's payment page; nothing is paid until you approve
+    step("paynow");                  // recorded in parallel – click right away
+    // only opens Paytm's payment page; nothing is paid until you approve
+    await clickUntil(byText(/^pay now$/i), () => !byText(/^pay now$/i)() || moved());
     return;
   }
   if (path.startsWith("/login")) return step("login", "GamesTheShop: you're not logged in in this browser. Log in once, then it goes straight to checkout.", true);
   if (path.startsWith("/product/") && job.step === "start") {
-    const btn = await find(byText(/^buy now$/i));
-    if (!btn) {
-      const oos = /out of stock|sold out|notify me/i.test(document.body.innerText);
-      return step("none", `GamesTheShop: ${oos ? "already sold out" : "BUY NOW button not found"} – check the tab.`, true);
-    }
-    await step("clicked");
-    btn.click();
+    const btn = await find(() => byText(/^buy now$/i)() ||
+      (document.body && /out of stock|sold out|notify me/i.test(document.body.innerText) && "oos"));
+    if (!btn || btn === "oos")
+      return step("none", `GamesTheShop: ${btn ? "already sold out" : "BUY NOW button not found"} – check the tab.`, true);
+    step("clicked");                 // recorded in parallel – click right away
+    await clickUntil(byText(/^buy now$/i), () => moved());
     return;
   }
   if (job.step === "start")
@@ -343,6 +369,7 @@ async function paytm(job) {
   }
   // smallest visible box containing both the "Scan QR" text and an image/canvas (the QR itself)
   const qr = await find(() => {
+    if (!document.body) return null;
     const boxes = [...document.querySelectorAll("div, section, li")].filter((e) =>
       e.offsetParent !== null && /scan qr/i.test(e.innerText || "") && e.querySelector("img, canvas, svg"));
     return boxes.sort((a, b) => a.innerText.length - b.innerText.length)[0] || null;
@@ -388,11 +415,26 @@ async function qrImage(box) {
   return { ...out, src: el.tagName === "IMG" && /^https:/.test(el.src) ? el.src : null };
 }
 
+// true once the biggest image in the QR box has loaded / the canvas has something drawn on it
+function qrDrawn(box, maxMs = 1500) {
+  const ready = () => {
+    const el = [...box.querySelectorAll("canvas, img, svg")].sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+    if (!el) return false;
+    if (el.tagName === "IMG") return el.complete && el.naturalWidth > 0;
+    if (el.tagName === "CANVAS") {
+      try { const d = el.getContext("2d").getImageData(0, 0, el.width, el.height).data;
+            for (let i = 3; i < d.length; i += 400) if (d[i]) return true; return false; } catch { return true; }
+    }
+    return true;
+  };
+  return find(() => ready() || null, maxMs).then(() => sleep(120));    // one frame of margin
+}
+
 async function sendQrToTelegram(box) {
   const o = await chrome.storage.local.get({ tgQr: true, tgToken: "", tgChatId: "" });
   if (!o.tgQr || !o.tgToken || !o.tgChatId) return false;
   const { qrMode = "dm" } = await chrome.storage.local.get("qrMode");
-  await sleep(800);                        // let the QR finish drawing
+  await qrDrawn(box);                      // as soon as the QR image is actually there
   const img = qrMode === "notify" ? {} : await qrImage(box);
   return chrome.runtime.sendMessage({ type: "qr", ...img, ...paytmDetails() }).catch(() => false);
 }
@@ -480,10 +522,10 @@ async function watchPayment(baselineOk) {
 
 async function getJob() {
   // the background saves the job right after opening the tab; on a fast page we can ask first
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 30; i++) {
     const job = await chrome.runtime.sendMessage({ type: "job?" }).catch(() => null);
     if (job) return job;
-    await sleep(500);
+    await sleep(100);
   }
   return null;
 }
@@ -511,9 +553,8 @@ async function getJob() {
     else if (isPaytm) await paytm(job);
     // in-page navigation (Next.js / SPA): wait for the URL to change, then handle the new page
     const end = Date.now() + 60000;
-    while (!moved() && Date.now() < end) await sleep(200);
+    while (!moved() && Date.now() < end) await sleep(50);
     if (!moved()) return;
-    await sleep(300);                                // let the new page render
     detectGtsAccount().catch(() => {});
     job = await chrome.runtime.sendMessage({ type: "job?" }).catch(() => null);
     if (!job) return;                                // finished (or expired)

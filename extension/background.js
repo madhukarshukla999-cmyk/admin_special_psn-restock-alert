@@ -156,6 +156,14 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     return true;
   }
   if (msg.type === "qr" && sender.tab) { sendQr(msg, sender.tab).then((ok) => reply(ok)); return true; }
+  if (msg.type === "watch?" && sender.tab) {
+    chrome.storage.local.get(qrKey(sender.tab.id)).then((o) => {
+      const q = o[qrKey(sender.tab.id)];
+      reply(q && q.expires > Date.now() ? { expires: q.expires } : null);
+    });
+    return true;
+  }
+  if (msg.type === "qr-result" && sender.tab) { qrResult(sender.tab, msg).then((ok) => reply(ok)); return true; }
   if (msg.type === "settings-changed") { ensureListener(); return; }
   if (msg.type === "test") {
     const urls = (msg.urls || [msg.url]).filter(Boolean);
@@ -194,8 +202,9 @@ function sendQr(msg, tab) {
 
 async function sendQrNow(msg, tab) {
   const s = await chrome.storage.local.get({ tgQr: true, tgToken: "", tgChatId: "", browserName: "",
-                                             gtsMobile: "", gtsAccount: null });
+                                             gtsMobile: "", gtsAccount: null, qrTimeoutSec: 120 });
   if (!s.tgQr || !s.tgToken || !s.tgChatId) return false;
+  const timeoutMs = Math.max(30, Number(s.qrTimeoutSec) || 120) * 1000;
   const job = (await getJobFor(tab.id)) || {};
   let blob = null, how = "image";
   if (msg.dataUrl) blob = await dataUrlToBlob(msg.dataUrl).catch(() => null);
@@ -216,7 +225,8 @@ async function sendQrNow(msg, tab) {
     ...(msg.order ? [`🧾 Order: ${msg.order}`] : []),
     `🕒 ${new Date().toLocaleTimeString()}`,
     "",
-    "Scan with any UPI app and enter your PIN (expires in a few minutes).",
+    `⏳ PAY WITHIN ${fmtLeft(timeoutMs)} – this QR is deleted at ${new Date(Date.now() + timeoutMs).toLocaleTimeString()} if not paid.`,
+    "Scan with any UPI app and enter your PIN.",
     "Same phone: save the image → UPI app → Scan QR → gallery.",
   ];
   const caption = lines.join("\n").slice(0, 1024);      // Telegram caption limit
@@ -227,6 +237,92 @@ async function sendQrNow(msg, tab) {
   const r = await fetch(`https://api.telegram.org/bot${s.tgToken}/sendPhoto`, { method: "POST", body: fd });
   const j = await r.json().catch(() => ({}));
   if (!j.ok) throw new Error(j.description || `HTTP ${r.status}`);
+  await startQrTimer(tab.id, {
+    msgId: j.result.message_id, chatId: s.tgChatId, caption, expires: Date.now() + timeoutMs,
+    title: job.title || "PSN card", storeName: job.storeName || "GamesTheShop", amount: msg.amount || "",
+    order: msg.order || "", account: s.browserName || "", mobile, test: !!job.test,
+  });
   await log(`QR sent to Telegram (${how}): ${job.title || ""} · ${s.browserName || "this browser"}${mobile ? " · +91 " + mobile : ""}`);
   return true;
 }
+
+// ---- QR timer + payment result (owner only: goes to the chat ID set in Options) ----
+// qr_<tabId> = { msgId, chatId, caption, expires, title, … }  (storage.local: survives a worker restart)
+const qrKey = (tabId) => "qr_" + tabId;
+const fmtLeft = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+
+async function tg(method, params, file) {
+  const { tgToken } = await chrome.storage.local.get({ tgToken: "" });
+  let body;
+  if (file) { body = new FormData(); for (const [k, v] of Object.entries(params)) body.append(k, v); body.append(file.field, file.blob, file.name); }
+  else body = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]));
+  const r = await fetch(`https://api.telegram.org/bot${tgToken}/${method}`, { method: "POST", body });
+  return r.json().catch(() => ({ ok: false }));
+}
+
+async function startQrTimer(tabId, q) {
+  await chrome.storage.local.set({ [qrKey(tabId)]: q });
+  chrome.alarms.create(qrKey(tabId), { when: q.expires });
+}
+
+async function allQrs() {
+  const all = await chrome.storage.local.get(null);
+  return Object.entries(all).filter(([k]) => /^qr_\d+$/.test(k)).map(([k, v]) => [Number(k.slice(3)), v]);
+}
+
+function resultLines(q) {
+  return [`${q.storeName}: ${q.title}${q.amount ? ` – ₹${q.amount}` : ""}`,
+          `👤 Account: ${q.account || "this browser"}`, ...(q.mobile ? [`📱 Mobile: +91 ${q.mobile}`] : []),
+          ...(q.order ? [`🧾 Order: ${q.order}`] : []), `🕒 ${new Date().toLocaleTimeString()}`];
+}
+
+// Time is up and nothing was paid: delete the QR from Telegram.
+async function expireQr(tabId) {
+  const q = (await chrome.storage.local.get(qrKey(tabId)))[qrKey(tabId)];
+  if (!q) return;
+  await chrome.storage.local.remove(qrKey(tabId));
+  await tg("deleteMessage", { chat_id: q.chatId, message_id: q.msgId });
+  await tg("sendMessage", { chat_id: q.chatId, disable_notification: true,
+    text: [`⌛ ${q.test ? "TEST · " : ""}QR expired – not paid in time, deleted.`, ...resultLines(q)].join("\n") });
+  await log(`QR expired (deleted from Telegram): ${q.title} · ${q.account || "this browser"}`);
+}
+
+// Live countdown in the caption (runs on the 30 s keep-alive alarm).
+async function tickQrs() {
+  for (const [tabId, q] of await allQrs()) {
+    const left = q.expires - Date.now();
+    if (left <= 0) { await expireQr(tabId); continue; }
+    const cap = q.caption.replace(/^⏳ .*$/m, `⏳ ${fmtLeft(left)} LEFT – deleted at ${new Date(q.expires).toLocaleTimeString()} if not paid.`);
+    await tg("editMessageCaption", { chat_id: q.chatId, message_id: q.msgId, caption: cap });
+  }
+}
+
+chrome.alarms.onAlarm.addListener((a) => {
+  if (/^qr_\d+$/.test(a.name)) expireQr(Number(a.name.slice(3)));
+  else if (a.name === "keepalive") tickQrs();
+});
+
+// The payment tab reported the result (content script watches the page text).
+async function qrResult(tab, msg) {
+  const q = (await chrome.storage.local.get(qrKey(tab.id)))[qrKey(tab.id)];
+  if (!q) return false;
+  await chrome.storage.local.remove(qrKey(tab.id));
+  chrome.alarms.clear(qrKey(tab.id));
+  await tg("deleteMessage", { chat_id: q.chatId, message_id: q.msgId });   // QR no longer needed
+  const ok = msg.result === "success";
+  const text = [`${ok ? "✅" : "❌"} ${q.test ? "TEST · " : ""}${ok ? "PAYMENT SUCCESSFUL" : "Payment failed / cancelled"}`,
+                ...resultLines(q), ...(msg.order && !q.order ? [`🧾 Order: ${msg.order}`] : []),
+                ...(msg.line ? [`“${msg.line.slice(0, 120)}”`] : [])].join("\n");
+  let shot = null;
+  if (await chrome.permissions.contains({ origins: ["<all_urls>"] })) {
+    await new Promise((r) => setTimeout(r, 1200));             // let the success page finish drawing
+    shot = await screenshotCrop(tab, null).catch(() => null);
+  }
+  if (shot) await tg("sendPhoto", { chat_id: q.chatId, caption: text.slice(0, 1024) }, { field: "photo", blob: shot, name: "result.png" });
+  else await tg("sendMessage", { chat_id: q.chatId, text: text + (ok ? "\n(no screenshot: press 'Allow screenshot fallback' in Options)" : "") });
+  await log(`${ok ? "Payment successful" : "Payment failed"}: ${q.title} · ${q.account || "this browser"}`);
+  chrome.notifications.create({ type: "basic", iconUrl: "icon.png", priority: 2,
+    title: ok ? "✅ Payment successful" : "❌ Payment failed", message: `${q.title} · ${q.account || "this browser"}` });
+  return true;
+}
+

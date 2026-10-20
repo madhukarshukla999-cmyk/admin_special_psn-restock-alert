@@ -340,8 +340,10 @@ async function paytm(job) {
   if (qr) {
     highlight(qr);
     const sent = await sendQrToTelegram(qr);
-    return step("qr", "Paytm: QR is ready – scan it with your UPI app and enter your PIN." +
-                      (sent ? " (also sent to Telegram)" : ""), true);
+    await step("qr", "Paytm: QR is ready – scan it with your UPI app and enter your PIN." +
+                     (sent ? " (also sent to Telegram)" : ""), true);
+    if (sent) watchPayment(false);          // this page shows the QR: only NEW success text counts
+    return;
   }
   return step("pay", "Paytm: payment page open – choose how to pay.", true);
 }
@@ -421,6 +423,39 @@ function paytmDetails() {
   return { order, amount };
 }
 
+// ---- after the QR: watch this tab for "payment successful" / "failed" (Paytm page or the shop's
+// order page it redirects to) and tell the background, which updates Telegram.
+const PAY_OK = /payment (was |is |has been )?success(ful)?|transaction success(ful)?|paid successfully|payment (received|completed|done)|order (has been |was )?(placed|confirmed|successful)|thank you for (your )?(order|purchase|shopping)/i;
+const PAY_FAIL = /payment (has |was )?(failed|declined|cancell?ed|unsuccessful)|transaction (failed|declined|cancell?ed)|order (failed|cancell?ed)/i;
+let watching = false;
+// short visible texts on the page that match (a heading / message, not a whole paragraph of FAQ)
+function payLines(re) {
+  return [...document.querySelectorAll("h1, h2, h3, h4, h5, p, div, span, strong, b")]
+    .filter((e) => e.offsetParent !== null && e.children.length < 4)
+    .map((e) => (e.innerText || "").trim()).filter((x) => x.length < 140 && re.test(x));
+}
+async function watchPayment(baselineOk) {
+  if (watching) return;
+  watching = true;
+  // on the QR page itself, ignore texts already there (e.g. an FAQ "what if my payment failed?")
+  const base = baselineOk ? new Set() : new Set([...payLines(PAY_OK), ...payLines(PAY_FAIL)]);
+  const end = Date.now() + 10 * 60 * 1000;
+  while (Date.now() < end) {
+    const ok = payLines(PAY_OK).filter((x) => !base.has(x)), fail = payLines(PAY_FAIL).filter((x) => !base.has(x));
+    if (ok.length || fail.length) {
+      await sleep(800);
+      const txt = document.body.innerText || "";
+      const line = (ok.length ? ok : fail).sort((a, b) => a.length - b.length)[0];
+      const order = (txt.match(/order\s*(?:id|no\.?|number)\s*[:#]?\s*([A-Za-z0-9_\-]{6,})/i) || [])[1] || "";
+      await chrome.runtime.sendMessage({ type: "qr-result", result: ok.length ? "success" : "failed", line, order }).catch(() => {});
+      return;
+    }
+    const still = await chrome.runtime.sendMessage({ type: "watch?" }).catch(() => null);
+    if (!still) return;                    // expired or already reported
+    await sleep(1000);
+  }
+}
+
 async function getJob() {
   // the background saves the job right after opening the tab; on a fast page we can ask first
   for (let i = 0; i < 6; i++) {
@@ -434,6 +469,9 @@ async function getJob() {
 (async () => {
   const host = location.hostname;
   detectGtsAccount().catch(() => {});
+  if (window === window.top) {             // a tab whose QR is still waiting: watch it for the result
+    chrome.runtime.sendMessage({ type: "watch?" }).then((w) => { if (w) watchPayment(true); }).catch(() => {});
+  }
   const isPaytm = host.endsWith("paytmpayments.com") || host.endsWith("paytm.in");
   const isAmazon = host === "amazon.in" || host.endsWith(".amazon.in");
   if (window !== window.top) {

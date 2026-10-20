@@ -110,7 +110,8 @@ async function handleAlert(data) {
   // Open EVERY card in the alert (1k, 2k, 3k, 4k …), one tab each, lowest value first.
   // GamesTheShop: every tab clicks through to checkout. Amazon: only the highest-value tab
   // does (each Amazon "Pay with UPI" creates its own order); the others just open.
-  const win = await chrome.windows.getLastFocused().catch(() => null);
+  let win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null);
+  if (!win) win = await chrome.windows.create({ focused: true, state: "normal" }).catch(() => null);   // no window open
   const last = items.length - 1;
   const opened = [];
   for (let i = 0; i < items.length; i++) {
@@ -218,48 +219,66 @@ function sendQr(msg, tab) {
 }
 
 async function sendQrNow(msg, tab) {
-  const s = await chrome.storage.local.get({ tgQr: true, tgToken: "", tgChatId: "", browserName: "",
-                                             gtsMobile: "", gtsAccount: null, qrTimeoutSec: 120 });
+  const s = await chrome.storage.local.get({ tgQr: true, qrMode: "dm", tgToken: "", tgChatId: "", browserName: "",
+    browserType: "", profileName: "", accountName: "", gtsMobile: "", amzMobile: "", gtsAccount: null, amzAccount: null,
+    qrTimeoutSec: 120 });
   if (!s.tgQr || !s.tgToken || !s.tgChatId) return false;
+  const notify = s.qrMode === "notify";
   const timeoutMs = Math.max(30, Number(s.qrTimeoutSec) || 120) * 1000;
   const job = (await getJobFor(tab.id)) || {};
-  let blob = null, how = "image";
-  if (msg.dataUrl) blob = await dataUrlToBlob(msg.dataUrl).catch(() => null);
-  if (!blob && msg.src) blob = await fetch(msg.src).then((r) => (r.ok ? r.blob() : null)).catch(() => null);
-  if (!blob || blob.size < 200) {
-    if (!(await chrome.permissions.contains({ origins: ["<all_urls>"] })))
-      throw new Error("couldn't read the QR image – in Options press 'Allow screenshot fallback'");
-    how = "screenshot"; blob = await screenshotCrop(tab, msg.rect);
+  const amazon = job.store === "amazon" || /amazon\.in/.test(tab.url || "");
+  const storeName = job.storeName && job.storeName !== "Test" ? job.storeName : amazon ? "Amazon" : "GamesTheShop";
+
+  let blob = null, how = "notify";
+  if (!notify) {
+    how = "image";
+    if (msg.dataUrl) blob = await dataUrlToBlob(msg.dataUrl).catch(() => null);
+    if (!blob && msg.src) blob = await fetch(msg.src).then((r) => (r.ok ? r.blob() : null)).catch(() => null);
+    if (!blob || blob.size < 200) {
+      if (!(await chrome.permissions.contains({ origins: ["<all_urls>"] })))
+        throw new Error("couldn't read the QR image – in Options press 'Allow screenshots'");
+      how = "screenshot"; blob = await screenshotCrop(tab, msg.rect);
+    }
   }
-  const acc = s.gtsAccount || {};
-  const mobile = s.gtsMobile || acc.mobile || "";
-  const who = [acc.name, acc.email].filter(Boolean).join(" · ");
+  // which account: GamesTheShop / Amazon details + this browser's profile
+  const acc = amazon ? (s.amzAccount || {}) : (s.gtsAccount || {});
+  const mobile = amazon ? s.amzMobile : (s.gtsMobile || acc.mobile || "");
+  const accName = acc.name || s.accountName || "";
+  const amount = msg.amount || (String(job.title || "").match(/[\d,]{3,}/) || [""])[0];
+  const deadline = new Date(Date.now() + timeoutMs).toLocaleTimeString();
+  const head = notify
+    ? `🔔 ${job.test ? "TEST · " : ""}QR for ₹${amount || "?"} generated – go to the browser and pay`
+    : `💳 ${job.test ? "TEST · " : ""}${storeName}: ${job.title || "PSN card"}${amount && !String(job.title || "").includes(amount) ? ` – ₹${amount}` : ""}`;
   const lines = [
-    `${job.test ? "TEST · " : ""}💳 ${job.storeName || "GamesTheShop"}: ${job.title || "PSN card"}${msg.amount ? ` – ₹${msg.amount}` : ""}`,
-    `👤 Account: ${s.browserName || "(name this browser in Options)"}`,
-    `📱 Mobile: ${mobile ? "+91 " + mobile : "not found – open gamestheshop.com once while signed in, or type it in Options"}`,
-    ...(who ? [`🪪 ${who}`] : []),
+    head,
+    ...(notify ? [`🛒 ${storeName}: ${job.title || "PSN card"}`] : []),
+    `🌐 Browser: ${s.browserType || "?"}  ·  🗂 Profile: ${s.profileName || "?"}`,
+    `👤 ${storeName} account: ${accName || "?"}`,
+    `📱 Mobile: ${mobile ? "+91 " + mobile : amazon ? "– (add it in Options)" : "not found – set it in Options"}`,
     ...(msg.order ? [`🧾 Order: ${msg.order}`] : []),
     `🕒 ${new Date().toLocaleTimeString()}`,
     "",
-    `⏳ PAY WITHIN ${fmtLeft(timeoutMs)} – this QR is deleted at ${new Date(Date.now() + timeoutMs).toLocaleTimeString()} if not paid.`,
-    "Scan with any UPI app and enter your PIN.",
-    "Same phone: save the image → UPI app → Scan QR → gallery.",
+    `⏳ PAY WITHIN ${fmtLeft(timeoutMs)} – ${notify ? "the QR on that browser expires" : "this QR is deleted"} at ${deadline}.`,
+    notify ? "Open that browser – the payment tab is in front with the QR highlighted." : "Scan with any UPI app and enter your PIN.",
+    ...(notify ? [] : ["Same phone: save the image → UPI app → Scan QR → gallery."]),
   ];
-  const caption = lines.join("\n").slice(0, 1024);      // Telegram caption limit
-  const fd = new FormData();
-  fd.append("chat_id", s.tgChatId);
-  fd.append("caption", caption);
-  fd.append("photo", blob, "qr.png");
-  const r = await fetch(`https://api.telegram.org/bot${s.tgToken}/sendPhoto`, { method: "POST", body: fd });
-  const j = await r.json().catch(() => ({}));
-  if (!j.ok) throw new Error(j.description || `HTTP ${r.status}`);
+  const text = lines.join("\n").slice(0, 1024);
+  let j;
+  if (notify) {
+    j = await tg("sendMessage", { chat_id: s.tgChatId, text });
+    // bring the payment tab to the front on the laptop
+    chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    chrome.windows.update(tab.windowId, { focused: true, drawAttention: true }).catch(() => {});
+  } else {
+    j = await tg("sendPhoto", { chat_id: s.tgChatId, caption: text }, { field: "photo", blob, name: "qr.png" });
+  }
+  if (!j.ok) throw new Error(j.description || "Telegram error");
   await startQrTimer(tab.id, {
-    msgId: j.result.message_id, chatId: s.tgChatId, caption, expires: Date.now() + timeoutMs,
-    title: job.title || "PSN card", storeName: job.storeName || "GamesTheShop", amount: msg.amount || "",
-    order: msg.order || "", account: s.browserName || "", mobile, test: !!job.test,
+    msgId: j.result.message_id, chatId: s.tgChatId, caption: text, kind: notify ? "text" : "photo",
+    expires: Date.now() + timeoutMs, title: job.title || "PSN card", storeName, amount,
+    order: msg.order || "", account: s.browserName || accName, mobile, test: !!job.test,
   });
-  await log(`QR sent to Telegram (${how}): ${job.title || ""} · ${s.browserName || "this browser"}${mobile ? " · +91 " + mobile : ""}`);
+  await log(`${notify ? "Telegram notified (pay in browser)" : `QR sent to Telegram (${how})`}: ${storeName} ${job.title || ""} · ${s.browserName || "this browser"}`);
   return true;
 }
 
@@ -288,7 +307,7 @@ async function allQrs() {
 }
 
 function resultLines(q) {
-  return [`${q.storeName}: ${q.title}${q.amount ? ` – ₹${q.amount}` : ""}`,
+  return [`${q.storeName}: ${q.title}${q.amount && !String(q.title).includes(q.amount) ? ` – ₹${q.amount}` : ""}`,
           `👤 Account: ${q.account || "this browser"}`, ...(q.mobile ? [`📱 Mobile: +91 ${q.mobile}`] : []),
           ...(q.order ? [`🧾 Order: ${q.order}`] : []), `🕒 ${new Date().toLocaleTimeString()}`];
 }
@@ -300,7 +319,7 @@ async function expireQr(tabId) {
   await chrome.storage.local.remove(qrKey(tabId));
   await tg("deleteMessage", { chat_id: q.chatId, message_id: q.msgId });
   await tg("sendMessage", { chat_id: q.chatId, disable_notification: true,
-    text: [`⌛ ${q.test ? "TEST · " : ""}QR expired – not paid in time, deleted.`, ...resultLines(q)].join("\n") });
+    text: [`⌛ ${q.test ? "TEST · " : ""}QR expired – not paid in time${q.kind === "text" ? "" : ", deleted"}.`, ...resultLines(q)].join("\n") });
   await log(`QR expired (deleted from Telegram): ${q.title} · ${q.account || "this browser"}`);
 }
 
@@ -309,8 +328,9 @@ async function tickQrs() {
   for (const [tabId, q] of await allQrs()) {
     const left = q.expires - Date.now();
     if (left <= 0) { await expireQr(tabId); continue; }
-    const cap = q.caption.replace(/^⏳ .*$/m, `⏳ ${fmtLeft(left)} LEFT – deleted at ${new Date(q.expires).toLocaleTimeString()} if not paid.`);
-    await tg("editMessageCaption", { chat_id: q.chatId, message_id: q.msgId, caption: cap });
+    const cap = q.caption.replace(/^⏳ .*$/m, `⏳ ${fmtLeft(left)} LEFT – ${q.kind === "text" ? "expires" : "deleted"} at ${new Date(q.expires).toLocaleTimeString()} if not paid.`);
+    if (q.kind === "text") await tg("editMessageText", { chat_id: q.chatId, message_id: q.msgId, text: cap });
+    else await tg("editMessageCaption", { chat_id: q.chatId, message_id: q.msgId, caption: cap });
   }
 }
 

@@ -107,12 +107,24 @@
 
 <section class="card">
   <h2>📲 QR to Telegram <span class="tag">owner only</span></h2>
-  <label class="switch"><input type="checkbox" id="tgQr"><span></span><i class="lbl">Send the payment QR to my Telegram</i></label>
+  <p class="muted small">GamesTheShop (Paytm) and Amazon UPI QRs.</p>
+  <div class="seg" id="qrModeSeg">
+    <label><input type="radio" name="qrMode" value="dm"><span><b>📷 Send QR in DM</b><small>Pay from your phone</small></span></label>
+    <label><input type="radio" name="qrMode" value="notify"><span><b>🔔 Pay manually</b><small>Only a notification – pay in the browser</small></span></label>
+    <label><input type="radio" name="qrMode" value="off"><span><b>⛔ Off</b><small>Nothing to Telegram</small></span></label>
+  </div>
+  <input type="checkbox" id="tgQr" class="hidden">
   <div class="grid2">
     <label class="field">Delete QR if unpaid after
       <div class="suffix"><input type="number" id="qrTimeoutSec" min="30" step="10"><span>sec</span></div></label>
-    <label class="field">Mobile override
+    <label class="field">GamesTheShop mobile
       <input type="tel" id="gtsMobile" placeholder="auto-detected"></label>
+  </div>
+  <div class="grid2">
+    <label class="field">Amazon mobile <span class="hint inline">optional</span>
+      <input type="tel" id="amzMobile" placeholder="10-digit number"></label>
+    <label class="field">Amazon account <span class="hint inline">auto</span>
+      <input type="text" id="amzName" disabled placeholder="open amazon.in signed in"></label>
   </div>
   <p class="muted small">✅ + screenshot when paid, ❌ when it fails, ⌛ deleted when time runs out. Only the owner chat gets these; everyone else just gets stock alerts.</p>
   <div class="banner warn small hidden" id="chatWarn"></div>

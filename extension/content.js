@@ -137,13 +137,23 @@ const amzChangePayment = () => {
 };
 
 // a square image/canvas of QR size, near text that mentions scanning / QR / UPI
-function highlightQr() {
-  const qr = [...document.querySelectorAll("img, canvas, svg")].find((e) => {
+function findQrEl() {
+  return [...document.querySelectorAll("img, canvas, svg")].find((e) => {
     const r = e.getBoundingClientRect();
     return r.width >= 120 && Math.abs(r.width - r.height) < r.width * 0.15 && /scan|qr|upi/i.test(boxText(e));
-  });
+  }) || null;
+}
+function highlightQr() {
+  const qr = findQrEl();
   if (qr) highlight(qr.parentElement || qr);
   return !!qr;
+}
+// Amazon: QR is on screen → send it to Telegram (DM / notify mode) and watch for the result
+async function amazonQrReady() {
+  const el = findQrEl();
+  const sent = el ? await sendQrToTelegram(el.parentElement || el) : false;
+  if (sent) watchPayment(false);
+  return step("qr", "Amazon: QR is ready – scan it with your UPI app and enter your PIN." + (sent ? " (Telegram notified)" : ""), true);
 }
 
 // A click like a real mouse: some pages only react to pointer/mouse down+up, not a bare click().
@@ -212,8 +222,8 @@ async function amazonCheckout(job) {
   if (!o.amazonUpiQr) return step("checkout", manual, true);
   if (job.step === "paid") {                            // after "Pay with UPI": the QR page
     const ok = await find(() => highlightQr(), 15000);
-    return step("qr", ok ? "Amazon: QR is ready – scan it with your UPI app and enter your PIN."
-                         : "Amazon: UPI payment page open – scan the QR and enter your PIN.", true);
+    if (ok) return amazonQrReady();
+    return step("qr", "Amazon: UPI payment page open – scan the QR and enter your PIN.", true);
   }
 
   // 1) payment-method page: choose "Scan and Pay with UPI", then "Use this payment method"
@@ -230,7 +240,7 @@ async function amazonCheckout(job) {
     await step("paid", "Amazon: review page – clicking 'Pay with UPI'…");
     realClick(amzPayWithUpi());    // order waits for your UPI payment; nothing is paid until you scan + PIN
     if (await find(() => !amzPayWithUpi() && highlightQr(), 15000))      // QR shown on the same page
-      return step("qr", "Amazon: QR is ready – scan it with your UPI app and enter your PIN.", true);
+      return amazonQrReady();
     return;
   }
   if (what === "frame") {
@@ -381,8 +391,10 @@ async function qrImage(box) {
 async function sendQrToTelegram(box) {
   const o = await chrome.storage.local.get({ tgQr: true, tgToken: "", tgChatId: "" });
   if (!o.tgQr || !o.tgToken || !o.tgChatId) return false;
+  const { qrMode = "dm" } = await chrome.storage.local.get("qrMode");
   await sleep(800);                        // let the QR finish drawing
-  return chrome.runtime.sendMessage({ type: "qr", ...(await qrImage(box)), ...paytmDetails() }).catch(() => false);
+  const img = qrMode === "notify" ? {} : await qrImage(box);
+  return chrome.runtime.sendMessage({ type: "qr", ...img, ...paytmDetails() }).catch(() => false);
 }
 
 // ---- which GamesTheShop account is signed in (read from the site's own localStorage) ----
@@ -413,6 +425,16 @@ async function detectGtsAccount() {
   };
   const { gtsAccount } = await chrome.storage.local.get("gtsAccount");
   if (JSON.stringify(gtsAccount || {}) !== JSON.stringify(acc)) await chrome.storage.local.set({ gtsAccount: acc });
+}
+
+async function detectAmazonAccount() {
+  if (location.hostname !== "www.amazon.in" || window !== window.top) return;
+  const el = document.querySelector("#nav-link-accountList-nav-line-1, #nav-greeting-name, .nav-line-1-container .nav-line-1");
+  const m = ((el && el.innerText) || "").match(/hello,?\s*(.+)/i);
+  const name = m ? m[1].trim() : "";
+  if (!name || /sign in/i.test(name)) return;
+  const { amzAccount } = await chrome.storage.local.get("amzAccount");
+  if (!amzAccount || amzAccount.name !== name) await chrome.storage.local.set({ amzAccount: { name } });
 }
 
 // order id / amount shown on the Paytm page, for the Telegram caption
@@ -469,6 +491,7 @@ async function getJob() {
 (async () => {
   const host = location.hostname;
   detectGtsAccount().catch(() => {});
+  detectAmazonAccount().catch(() => {});
   if (window === window.top) {             // a tab whose QR is still waiting: watch it for the result
     chrome.runtime.sendMessage({ type: "watch?" }).then((w) => { if (w) watchPayment(true); }).catch(() => {});
   }

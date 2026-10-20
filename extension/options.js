@@ -28,9 +28,12 @@ $("save").onclick = async () => {
 };
 
 $("test").onclick = () => {
-  const url = $("testUrl").value.trim() || "https://www.gamestheshop.com/";
+  // one or more links (separate with spaces or new lines) – several = a multi-card restock
+  const urls = $("testUrl").value.split(/\s+/).filter((u) => u.startsWith("https://"));
+  if (!urls.length) urls.push("https://www.gamestheshop.com/");
+  const url = urls[0];
   const store = url.includes("amazon.in") ? "amazon" : url.includes("gamestheshop.com") ? "gamestheshop" : "test";
-  chrome.runtime.sendMessage({ type: "test", url, store });
+  chrome.runtime.sendMessage({ type: "test", url, urls, store });
 };
 
 chrome.storage.onChanged.addListener(load);

@@ -380,7 +380,45 @@ async function sendQrToTelegram(box) {
   const o = await chrome.storage.local.get({ tgQr: true, tgToken: "", tgChatId: "" });
   if (!o.tgQr || !o.tgToken || !o.tgChatId) return false;
   await sleep(800);                        // let the QR finish drawing
-  return chrome.runtime.sendMessage({ type: "qr", ...(await qrImage(box)) }).catch(() => false);
+  return chrome.runtime.sendMessage({ type: "qr", ...(await qrImage(box)), ...paytmDetails() }).catch(() => false);
+}
+
+// ---- which GamesTheShop account is signed in (read from the site's own localStorage) ----
+function jwtPayload(tok) {
+  try { return JSON.parse(atob(tok.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))); } catch { return null; }
+}
+function findMobile(obj, depth = 0) {
+  if (!obj || depth > 4) return "";
+  const norm = (v) => { const d = String(v).replace(/\D/g, "").replace(/^0+/, ""); const m = d.match(/^(?:91)?([6-9]\d{9})$/); return m ? m[1] : ""; };
+  for (const [k, v] of Object.entries(obj))
+    if (/phone|mobile|contact_?no|msisdn/i.test(k) && (typeof v === "string" || typeof v === "number") && norm(v)) return norm(v);
+  for (const v of Object.values(obj))
+    if (v && typeof v === "object") { const m = findMobile(v, depth + 1); if (m) return m; }
+  return "";
+}
+async function detectGtsAccount() {
+  if (location.hostname !== "www.gamestheshop.com" || window !== window.top) return;
+  let user = null;
+  try { user = JSON.parse(localStorage.getItem("user") || "null"); } catch { /* ignore */ }
+  const tok = localStorage.getItem("accessToken");
+  const jwt = tok ? jwtPayload(tok) : null;
+  if (!user && !jwt) return;                       // not signed in here
+  const acc = {
+    mobile: findMobile(user) || findMobile(jwt),
+    name: (user && (user.display_name || user.name || [user.first_name, user.last_name].filter(Boolean).join(" "))) || (jwt && jwt.name) || "",
+    email: (user && (user.email || user.contact_email)) || (jwt && (jwt.email || jwt.contact_email)) || "",
+    id: String((user && user.id) || (jwt && (jwt.user_id || jwt.id || jwt.sub)) || ""),
+  };
+  const { gtsAccount } = await chrome.storage.local.get("gtsAccount");
+  if (JSON.stringify(gtsAccount || {}) !== JSON.stringify(acc)) await chrome.storage.local.set({ gtsAccount: acc });
+}
+
+// order id / amount shown on the Paytm page, for the Telegram caption
+function paytmDetails() {
+  const txt = document.body.innerText || "";
+  const order = (txt.match(/order\s*(?:id|no\.?|number)\s*[:#]?\s*([A-Za-z0-9_\-]{6,})/i) || [])[1] || "";
+  const amount = (txt.match(/₹\s?([\d,]+(?:\.\d{1,2})?)/) || [])[1] || "";
+  return { order, amount };
 }
 
 async function getJob() {
@@ -395,6 +433,7 @@ async function getJob() {
 
 (async () => {
   const host = location.hostname;
+  detectGtsAccount().catch(() => {});
   const isPaytm = host.endsWith("paytmpayments.com") || host.endsWith("paytm.in");
   const isAmazon = host === "amazon.in" || host.endsWith(".amazon.in");
   if (window !== window.top) {
@@ -414,6 +453,7 @@ async function getJob() {
     while (!moved() && Date.now() < end) await sleep(200);
     if (!moved()) return;
     await sleep(300);                                // let the new page render
+    detectGtsAccount().catch(() => {});
     job = await chrome.runtime.sendMessage({ type: "job?" }).catch(() => null);
     if (!job) return;                                // finished (or expired)
   }

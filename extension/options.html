@@ -19,6 +19,8 @@
 <h2>🎮 PSN Stock Bot</h2>
 <div>Connection: <span id="status">–</span></div>
 
+<label>Name of this browser / account (shown on every QR in Telegram)
+  <input type="text" id="browserName" placeholder="e.g. Laptop Brave – Madhukar"></label>
 <label>Connection code (send <b>/extension</b> to your bot)
   <input type="text" id="topic" placeholder="psnbot-…">
 </label>
@@ -44,6 +46,9 @@
     <input type="text" id="tgToken" placeholder="123456789:ABC…" autocomplete="off"></label>
   <label>Chat ID (shown by <b>/extension</b>)
     <input type="text" id="tgChatId" placeholder="123456789"></label>
+  <label>GamesTheShop mobile number (leave empty to detect it automatically)
+    <input type="text" id="gtsMobile" placeholder="10-digit number"></label>
+  <small id="gtsDetected"></small><br>
   <button id="allowShots" type="button">Allow screenshot fallback</button>
   <small>Only needed if the QR can't be read directly: lets the extension screenshot the payment tab.</small><br>
   <small>The token stays in this browser only. Anyone with it can control your bot – keep it private.</small>

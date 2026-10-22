@@ -99,13 +99,31 @@ class Users:
         rec[name] = not self.pref(cid, name)
         return rec[name]
 
+    # -- owner-only: private stores + alert delays (never shown to anyone else) ----
+    def private(self) -> set[str]:
+        return set(self.state.settings.get("private_stores", []))
+
+    def hidden(self, cid) -> set[str]:
+        """Stores this person must not see at all (private ones, unless they're the owner)."""
+        return set() if self.is_admin(cid) else self.private()
+
+    def delay(self, cid) -> int:
+        """Seconds this person's restock alerts wait (owner: always 0)."""
+        if self.is_admin(cid):
+            return 0
+        own = (self.get(cid) or {}).get("delay")
+        return int(own if own is not None else (self.state.settings.get("delays") or {}).get("users", 0))
+
     def recipients(self, store_id: str | None = None, pref: str | None = None,
                    admins_only: bool = False) -> list[str]:
         out = []
+        private = self.private()
         for cid, rec in self.active().items():
             if admins_only and not rec.get("admin"):
                 continue
             if store_id and store_id in rec.get("muted", []):
+                continue
+            if store_id and store_id in private and not rec.get("admin"):
                 continue
             if pref and not self.pref(cid, pref):
                 continue

@@ -147,6 +147,7 @@ class Bot:
         self._resched: dict[str, asyncio.Event] = {}
         self._burst_cache: dict[str, tuple] = {}
         self._bg: set[asyncio.Task] = set()
+        self._skipped: set[tuple[str, str]] = set()     # (chat, item key) delayed alerts that were dropped
         self.mailer = Mailer()
 
         self.stores = []
@@ -331,8 +332,9 @@ class Bot:
         self.state.save()
         if self._check_requesters:
             ids, self._check_requesters = sorted(set(self._check_requesters)), []
-            n = sum(1 for r in self.state.items.values() if r.get("in_stock"))
-            failed = [s.name for s, r in zip(self.stores, results) if r is None]
+            priv = self.users.private() if any(not self.users.is_admin(i) for i in ids) else set()
+            n = sum(1 for r in self.state.items.values() if r.get("in_stock") and r.get("store") not in priv)
+            failed = [s.name for s, r in zip(self.stores, results) if r is None and s.id not in priv]
             msg = (f"✅ Checked {len(self.stores)} stores in {time.monotonic() - t0:.0f} s. "
                    f"{n} card{'s' if n != 1 else ''} in stock" + (" (see /status)." if n else ".")
                    + (f"\n⚠️ Couldn't check: {', '.join(failed)}" if failed else ""))
@@ -513,13 +515,17 @@ class Bot:
     async def _send_restock(self, client, restocked: dict[str, list[Item]]) -> None:
         for store_name, items in restocked.items():
             items = sorted(items, key=_sort_key)
-            if self.cfg.get("extension_push", True) and not self.tg.dry_run and not extension_push.paused(self.state):
+            sid = items[0].store
+            owner_wants = [i for i in items if any(sid not in self.users.muted(a) and self.users.wants_value(a, sid, i.denomination)
+                                                   for a in self.users.admins)]
+            if (owner_wants and self.cfg.get("extension_push", True) and not self.tg.dry_run
+                    and not extension_push.paused(self.state)):
                 # laptop extension first: it's the fastest path to checkout
-                task = asyncio.create_task(extension_push.publish(client, self.state, store_name, items))
+                # (only stores / card values the owner has switched on in /menu)
+                task = asyncio.create_task(extension_push.publish(client, self.state, store_name, owner_wants))
                 self._bg.add(task)
                 task.add_done_callback(self._bg.discard)
-            sid = items[0].store
-            groups: dict[tuple, list] = {}      # same cards -> one message to several people
+            groups: dict[tuple, list] = {}      # same cards + same delay -> one message
             quieted = False
             for cid in self.users.recipients(store_id=sid):
                 mine = [i for i in items if self.users.wants_value(cid, i.store, i.denomination)]
@@ -529,15 +535,40 @@ class Bot:
                     self.users.add_missed(cid, mine)   # told in the morning
                     quieted = True
                     continue
-                groups.setdefault(tuple(i.key for i in mine), [mine, []])[1].append(cid)
+                groups.setdefault((tuple(i.key for i in mine), self.users.delay(cid)), [mine, []])[1].append(cid)
             if quieted:
                 self.state.save()
-            for mine, cids in groups.values():
-                body = "\n\n".join(_fmt_item(i) for i in mine)
-                await self.broadcast(client, f"🟢 <b>PlayStation gift card back in stock on {store_name}!</b>\n"
-                                             f"<i>{_now()}</i>\n\n{body}\n\n👇 Tap to buy", store_id=sid,
-                                     subject=f"🟢 PlayStation card back in stock on {store_name}",
-                                     reply_markup=buy_buttons(mine, store_name), only=cids)
+            for (_, delay), (mine, cids) in sorted(groups.items(), key=lambda kv: kv[0][1]):
+                if delay:
+                    self._later(delay, self._send_restock_to(client, store_name, sid, mine, cids, delayed=True))
+                else:
+                    await self._send_restock_to(client, store_name, sid, mine, cids)
+
+    def _later(self, seconds: float, coro) -> None:
+        async def run():
+            await asyncio.sleep(seconds)
+            try:
+                await coro
+            except Exception:  # noqa: BLE001
+                log.exception("Delayed alert failed")
+        task = asyncio.create_task(run())
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
+    async def _send_restock_to(self, client, store_name, sid, items, cids, delayed: bool = False) -> None:
+        if delayed:     # owner-set delay: only cards that are still in stock now
+            live = [i for i in items if (self.state.items.get(i.key) or {}).get("in_stock")]
+            for i in items:
+                if i not in live:
+                    self._skipped.update((c, i.key) for c in cids)
+            items = live
+            if not items:
+                return
+        body = "\n\n".join(_fmt_item(i) for i in items)
+        await self.broadcast(client, f"🟢 <b>PlayStation gift card back in stock on {store_name}!</b>\n"
+                                     f"<i>{_now()}</i>\n\n{body}\n\n👇 Tap to buy", store_id=sid,
+                             subject=f"🟢 PlayStation card back in stock on {store_name}",
+                             reply_markup=buy_buttons(items, store_name), only=cids)
 
     async def _send_sold_out(self, client, sold_out: dict[str, list[tuple[Item, float | None]]]) -> None:
         for store_name, pairs in sold_out.items():
@@ -548,18 +579,31 @@ class Bot:
                     continue                    # the morning message says how long they lasted
                 mine = [p for p in pairs if self.users.wants_value(cid, p[0].store, p[0].denomination)]
                 if mine:
-                    groups.setdefault(tuple(p[0].key for p in mine), [mine, []])[1].append(cid)
-            for mine, cids in groups.values():
-                lines = []
-                for it, lasted in sorted(mine, key=lambda p: _sort_key(p[0])):
-                    extra = f" — was in stock for {hist.fmt_duration(lasted)}" if lasted is not None else ""
-                    lines.append(f"• {html.escape(it.title)}{extra}")
-                await self.broadcast(client, f"🔴 <b>Sold out on {store_name}</b> · <i>{_now()}</i>\n" + "\n".join(lines),
-                                     store_id=sid, pref="soldout", only=cids,
-                                     subject=f"🔴 PlayStation card sold out on {store_name}")
+                    groups.setdefault((tuple(p[0].key for p in mine), self.users.delay(cid)), [mine, []])[1].append(cid)
+            for (_, delay), (mine, cids) in groups.items():
+                if delay:      # same delay as their restock alert, so it never arrives first
+                    self._later(delay + 1, self._sold_out_to(client, store_name, sid, mine, cids))
+                else:
+                    await self._sold_out_to(client, store_name, sid, mine, cids)
+
+    async def _sold_out_to(self, client, store_name, sid, mine, cids) -> None:
+        by: dict[tuple, list] = {}
+        for c in cids:   # people whose delayed restock was dropped (already sold out) don't need it
+            got = [p for p in mine if (c, p[0].key) not in self._skipped]
+            self._skipped.difference_update((c, p[0].key) for p in mine)
+            if got:
+                by.setdefault(tuple(p[0].key for p in got), [got, []])[1].append(c)
+        for mine, cids in by.values():
+            lines = []
+            for it, lasted in sorted(mine, key=lambda p: _sort_key(p[0])):
+                extra = f" — was in stock for {hist.fmt_duration(lasted)}" if lasted is not None else ""
+                lines.append(f"• {html.escape(it.title)}{extra}")
+            await self.broadcast(client, f"🔴 <b>Sold out on {store_name}</b> · <i>{_now()}</i>\n" + "\n".join(lines),
+                                 store_id=sid, pref="soldout", only=cids,
+                                 subject=f"🔴 PlayStation card sold out on {store_name}")
 
     def _summary_for(self, cid: str) -> str | None:
-        muted = self.users.muted(cid)
+        muted = self.users.muted(cid) | self.users.hidden(cid)
         active = [s for s in self.stores if s.id not in muted]
         if not active:
             return None
@@ -591,7 +635,7 @@ class Bot:
     # -- daily summary -----------------------------------------------------
     def daily_summary_text(self, cid: str, now: float | None = None) -> str:
         now = now or time.time()
-        muted = self.users.muted(cid)
+        muted = self.users.muted(cid) | self.users.hidden(cid)
         evs = [e for e in hist.recent(self.state.history, 86400, now) if e["store"] not in muted]
         lines = [f"📰 <b>Daily summary</b> · {datetime.fromtimestamp(now, IST).strftime('%d %b %Y')}", ""]
         if evs:

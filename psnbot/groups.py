@@ -94,7 +94,7 @@ class Groups:
         self.bot.state.settings["group_posts"] = [p for p in self.posts if p["chat"] != cid]
         self._save()
         if rec:
-            await self.tg.send(client, "👋 I've been disconnected by the owner. Bye!", chat_ids=[cid])
+            await self.tg.send(client, "👋 I've been disconnected. Bye!", chat_ids=[cid])
             await self.tg.api(client, "leaveChat", {"chat_id": cid})
 
     # -- posting -----------------------------------------------------------
@@ -114,11 +114,33 @@ class Groups:
             lines.append("<i>⏱ This post disappears when the cards sell out.</i>")
         return "\n".join(lines).strip(), ({"inline_keyboard": btns[:20]} if btns else None)
 
+    def delay(self, g: dict) -> int:
+        """Owner-set wait before posting (per group, else the default for all groups)."""
+        d = g.get("delay")
+        return int(d if d is not None else (self.bot.state.settings.get("delays") or {}).get("groups", 0))
+
     async def publish(self, client, store_name: str, items, fmt_item, when: str) -> None:
         sid = items[0].store
+        if sid in self.bot.users.private():
+            return                                  # private stores are for the owner only
         targets = [(cid, g) for cid, g in self.all.items() if g.get("on", True) and sid in g.get("stores", [])]
         if not targets:
             return
+        now_t = [(c, g) for c, g in targets if not self.delay(g)]
+        for c, g in targets:
+            if self.delay(g):
+                async def later(c=c, g=g, wait=self.delay(g)):
+                    await asyncio.sleep(wait)
+                    live = [i for i in items if (self.bot.state.items.get(i.key) or {}).get("in_stock")]
+                    if live and c in self.all:
+                        await self._post(client, store_name, live, fmt_item, when, [(c, g)])
+                task = asyncio.create_task(later())
+                self.bot._bg.add(task)
+                task.add_done_callback(self.bot._bg.discard)
+        if now_t:
+            await self._post(client, store_name, items, fmt_item, when, now_t)
+
+    async def _post(self, client, store_name, items, fmt_item, when, targets) -> None:
         rendered = [{"key": i.key, "title": i.title, "url": i.url, "html": fmt_item(i),
                      "label": f"₹{i.denomination:,}" if i.denomination else i.title[:25]} for i in items]
         for cid, g in targets:
@@ -216,12 +238,21 @@ class Groups:
         stores = set(g.get("stores", []))
         text = (f"{'📣' if g.get('type') == 'channel' else '👥'} <b>{html.escape(g.get('title', cid))}</b>\n\n"
                 f"Posting: <b>{'on' if on else 'paused'}</b> · Auto-delete when sold out: <b>{'on' if ad else 'off'}</b>\n"
-                "Tap the stores whose restocks should be posted here (✅ = posted).")
-        sb = [{"text": f"{'✅' if s.id in stores else '▫'} {s.name}", "callback_data": f"gr:st:{cid}:{s.id}"} for s in self.bot.stores]
+                f"Post delay: <b>{self._delay_txt(g)}</b> (hidden – only you see this)\n"
+                "Tap the stores whose restocks should be posted here (✅ = posted, 🔒 = private, never posted).")
+
+    def _delay_txt(self, g: dict) -> str:
+        d = self.delay(g)
+        own = "" if g.get("delay") is not None else " (default)"
+        return ("instant" if not d else f"{d // 60} min" + (f" {d % 60}s" if d % 60 else "") if d >= 60 else f"{d}s") + own
+        priv = self.bot.users.private()
+        sb = [{"text": f"{'🔒' if s.id in priv else '✅' if s.id in stores else '▫'} {s.name}", "callback_data": f"gr:st:{cid}:{s.id}"} for s in self.bot.stores]
         rows = [sb[i:i + 2] for i in range(0, len(sb), 2)]
         rows += [[{"text": "✅ All stores", "callback_data": f"gr:all:{cid}"}, {"text": "▫ None", "callback_data": f"gr:none:{cid}"}],
                  [{"text": "⏸ Pause posting" if on else "▶ Resume posting", "callback_data": f"gr:on:{cid}"},
                   {"text": f"{'✅' if ad else '▫'} Auto-delete", "callback_data": f"gr:ad:{cid}"}],
+                 [{"text": ("✅ " if g.get("delay") == d else "") + ("⏳ default" if d is None else "⏳ now" if d == 0 else f"⏳ {d // 60} min" if d >= 60 else f"⏳ {d}s"),
+                   "callback_data": f"gr:dl:{cid}:{'d' if d is None else d}"} for d in (None, 0, 30, 60, 120, 300)],
                  [{"text": "🧪 Send test", "callback_data": f"gr:test:{cid}"},
                   {"text": "🚫 Disconnect", "callback_data": f"gr:rm?:{cid}"}],
                  [{"text": "⬅ All groups", "callback_data": "gr:list"}]]
@@ -253,6 +284,11 @@ class Groups:
         elif action == "ad":
             g["autodelete"] = not g.get("autodelete", True)
             note = f"Auto-delete {'on' if g['autodelete'] else 'off'}"
+        elif action == "dl" and len(parts) == 4:
+            g["delay"] = None if parts[3] == "d" else int(parts[3])
+            if g["delay"] is None:
+                g.pop("delay")
+            note = f"Post delay: {self._delay_txt(g)}"
         elif action == "test":
             note = "Test sent ✅ (deleted in 30 s)" if await self.test(client, gid) else "❌ Couldn't post there – check my permissions"
         elif action == "rm?":

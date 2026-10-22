@@ -59,6 +59,17 @@ async function opts() {
   return chrome.storage.local.get({ clickPayNow: true, upiId: "" });
 }
 
+const scriptStart = Date.now();
+// the product's own buy button reads "Out of stock" / "Notify me" (ignores the site-wide fixed form)
+function gtsMainOos() {
+  if (!document.body) return false;
+  return [...document.querySelectorAll("button")].some((e) => {
+    if (!/^(out of stock|sold out|notify me)$/i.test((e.innerText || "").trim()) || !e.getClientRects().length) return false;
+    for (let p = e; p; p = p.parentElement) if (getComputedStyle(p).position === "fixed") return false;
+    return !e.closest("[role=dialog]");
+  });
+}
+
 async function gamestheshop(job) {
   const path = location.pathname;
   if (path.startsWith("/checkout")) {
@@ -73,14 +84,23 @@ async function gamestheshop(job) {
     return;
   }
   if (path.startsWith("/login")) return step("login", "GamesTheShop: you're not logged in in this browser. Log in once, then it goes straight to checkout.", true);
-  if (path.startsWith("/product/") && job.step === "start") {
-    const btn = await find(() => byText(/^buy now$/i)() ||
-      (document.body && /out of stock|sold out|notify me/i.test(document.body.innerText) && "oos"));
-    if (!btn || btn === "oos")
-      return step("none", `GamesTheShop: ${btn ? "already sold out" : "BUY NOW button not found"} – check the tab.`, true);
-    step("clicked");                 // recorded in parallel – click right away
-    await clickUntil(byText(/^buy now$/i), () => moved());
-    return;
+  if (path.startsWith("/product/") && (job.step === "start" || job.step === "reloaded")) {
+    // The product's stock arrives a few seconds after the page appears, and the site has a fixed
+    // "Notify Me" form on EVERY page – so wait for BUY NOW, and only call it sold out when the
+    // product's own button says so after the page had time to load.
+    const buy = byText(/^buy now$/i);
+    const btn = await find(() => buy() || (Date.now() - scriptStart > 4000 && gtsMainOos() && "oos"), 25000);
+    if (btn && btn !== "oos") {
+      step("clicked");               // recorded in parallel – click right away
+      await clickUntil(buy, () => moved());
+      return;
+    }
+    if (job.step === "start") {      // stock can lag a moment behind the bot's check: reload once
+      await step("reloaded", "GamesTheShop: page shows sold out – reloading once…");
+      location.reload();
+      return;
+    }
+    return step("none", `GamesTheShop: ${btn ? "sold out by the time the page loaded" : "BUY NOW button not found"} – check the tab.`, true);
   }
   if (job.step === "start")
     return step("none", "GamesTheShop: opened a page that isn't a product – nothing to click. " +

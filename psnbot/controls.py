@@ -27,8 +27,7 @@ log = logging.getLogger(__name__)
 
 COMMANDS = [
     {"command": "menu", "description": "My alerts: stores, card values, quiet hours"},
-    {"command": "panel", "description": "(owner) Control panel"},
-    {"command": "groups", "description": "(owner) Post alerts to a group / channel"},
+
     {"command": "week", "description": "Weekly report"},
     {"command": "quiet", "description": "Quiet hours, e.g. /quiet 23:00 07:00"},
     {"command": "status", "description": "What's in stock right now"},
@@ -39,11 +38,25 @@ COMMANDS = [
     {"command": "cycles", "description": "See/change how often each store is checked"},
     {"command": "whatsapp", "description": "Get alerts on WhatsApp too"},
     {"command": "email", "description": "Get alerts by email too"},
-    {"command": "users", "description": "(owner) Who gets alerts"},
-    {"command": "update", "description": "(owner) Install the latest version"},
-    {"command": "extension", "description": "(owner) Connect the laptop browser extension"},
+
     {"command": "help", "description": "How this bot works"},
 ]
+
+
+OWNER_COMMANDS = [
+    {"command": "panel", "description": "Control panel"},
+    {"command": "groups", "description": "Post alerts to a group / channel"},
+    {"command": "users", "description": "Who gets alerts"},
+    {"command": "extension", "description": "Connect the laptop browser extension"},
+    {"command": "update", "description": "Install the latest version"},
+]
+OWNER_ONLY = {"/panel", "/dashboard", "/owner", "/groups", "/group", "/channels", "/users", "/update", "/extension"}
+DELAY_PRESETS = [0, 30, 60, 120, 300, 600]
+
+
+def fmt_delay(sec) -> str:
+    sec = int(sec or 0)
+    return "instant" if not sec else f"{sec}s" if sec < 60 else f"{sec // 60} min" + (f" {sec % 60}s" if sec % 60 else "")
 
 
 FULL_PRESETS = [15, 30, 60, 120, 180, 300, 600, 1800]
@@ -92,6 +105,14 @@ class Controls:
     def _save(self) -> None:
         self.bot.state.save()
 
+    def _stores(self, cid):
+        """Stores this person can see (private ones only for the owner)."""
+        hide = self.users.hidden(cid)
+        return [s for s in self.bot.stores if s.id not in hide]
+
+    def _priv_tag(self, cid, sid) -> str:
+        return " 🔒" if self.users.is_admin(cid) and sid in self.users.private() else ""
+
     # -- views -----------------------------------------------------------
     def _in_stock(self, store_id: str) -> int:
         return sum(1 for r in self.bot.state.items.values() if r.get("store") == store_id and r.get("in_stock"))
@@ -99,10 +120,10 @@ class Controls:
     def menu_text(self, cid) -> str:
         muted = self.users.muted(cid)
         lines = ["🛎 <b>Your notifications</b>", ""]
-        for s in self.bot.stores:
+        for s in self._stores(cid):
             on = s.id not in muted
             n = self._in_stock(s.id)
-            lines.append(f"{'✅' if on else '🔕'} <b>{html.escape(s.name)}</b>: {'on' if on else 'off'}"
+            lines.append(f"{'✅' if on else '🔕'} <b>{html.escape(s.name)}</b>{self._priv_tag(cid, s.id)}: {'on' if on else 'off'}"
                          + (f" · {n} in stock" if n else ""))
         lines += ["",
                   f"💳 Card values: <b>{self._values_short(cid)}</b>",
@@ -118,7 +139,7 @@ class Controls:
     def menu_markup(self, cid) -> dict:
         muted = self.users.muted(cid)
         buttons = [{"text": f"{'✅' if s.id not in muted else '🔕'} {s.name}", "callback_data": f"t:{s.id}"}
-                   for s in self.bot.stores]
+                   for s in self._stores(cid)]
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         rows.append([{"text": "🔔 All on", "callback_data": "all:on"},
                      {"text": "🔕 All off", "callback_data": "all:off"}])
@@ -179,7 +200,7 @@ class Controls:
         presets = [{"text": ("✅ " if cur == (s, e) else "") + f"{hm(s)}–{hm(e)}", "callback_data": f"qh:{o}:set:{s}:{e}"}
                    for s, e in self.QUIET_PRESETS]
         rows = [presets[:2], presets[2:], [{"text": ("✅ " if not q else "") + "🔔 Off – alert me any time", "callback_data": f"qh:{o}:off"}]]
-        sb = [{"text": f"{'🔔' if s.id in allow else '🌙'} {s.name}", "callback_data": f"qh:{o}:al:{s.id}"} for s in self.bot.stores]
+        sb = [{"text": f"{'🔔' if s.id in allow else '🌙'} {s.name}", "callback_data": f"qh:{o}:al:{s.id}"} for s in self._stores(cid)]
         rows += [sb[i:i + 2] for i in range(0, len(sb), 2)]
         rows.append(self._back_row(o))
         return head, {"inline_keyboard": rows}
@@ -191,7 +212,7 @@ class Controls:
         base = self.users.value_rule(cid, None)
         lines = ["💳 <b>Which cards do you want alerts for?</b>", "",
                  f"All stores: <b>{rule_text(base)}</b>"]
-        for s in self.bot.stores:
+        for s in self._stores(cid):
             if self.users.has_store_rule(cid, s.id):
                 lines.append(f"• {html.escape(s.name)}: <b>{rule_text(self.users.value_rule(cid, s.id))}</b>")
         lines += ["", "Tap a value for <b>all stores</b>, or tap a store to give it its own rule "
@@ -202,7 +223,7 @@ class Controls:
                  "callback_data": f"cv:{o}:all:{v}"} for v in self.MIN_PRESETS]
         rows = [mins[:3], mins[3:]]
         sb = []
-        for s in self.bot.stores:
+        for s in self._stores(cid):
             tag = rule_text(self.users.value_rule(cid, s.id)) if self.users.has_store_rule(cid, s.id) else "same"
             sb.append({"text": f"⚙ {s.name} · {tag}"[:40], "callback_data": f"cv:{o}:st:{s.id}"})
         rows += [sb[i:i + 2] for i in range(0, len(sb), 2)]
@@ -255,6 +276,9 @@ class Controls:
                  f"⏱ Check speed: " + (f"<b>⚡ burst now</b> ({', '.join(bursting)})" if bursting else "normal"),
                  f"🌙 Your quiet hours: <b>{self._quiet_short(cid)}</b> · 💳 Your cards: <b>{self._values_short(cid, 30)}</b>",
                  f"📢 Groups: <b>{len(b.groups.all)}</b> connected" if b.groups.all else "📢 Groups: none connected",
+                 f"👑 You get alerts first · others wait <b>{fmt_delay((st.settings.get('delays') or {}).get('users', 0))}</b>, "
+                 f"groups <b>{fmt_delay((st.settings.get('delays') or {}).get('groups', 0))}</b>"
+                 + (f" · 🔒 private: {', '.join(b.names[s] for s in self.users.private() if s in b.names)}" if self.users.private() else ""),
                  "", "Tap a button – everything changes right here."]
         cur = mode or ""
         rows = [
@@ -264,6 +288,8 @@ class Controls:
              for k, lbl in (("dm", "📷 QR in DM"), ("notify", "🔔 Pay manually"), ("off", "⛔ QR off"))],
             [{"text": "⏱ Check speed", "callback_data": "cy:list"}, {"text": "🏪 Stores & my alerts", "callback_data": "refresh"}],
             [{"text": "🌙 Quiet hours", "callback_data": "qh:pn:home"}, {"text": "💳 Card values", "callback_data": "cv:pn:home"}],
+            [{"text": "⏳ Alert delays", "callback_data": "dl:home"},
+             {"text": f"🔒 Private stores ({len(self.users.private())})", "callback_data": "pv:home"}],
             [{"text": f"📢 Groups ({len(b.groups.all)})", "callback_data": "gr:list"},
              {"text": "📊 Weekly report", "callback_data": "wk:pn"}],
             [{"text": "🔎 Check all now", "callback_data": "pn:check"}, {"text": "🔄 Refresh", "callback_data": "pn:home"}],
@@ -283,7 +309,8 @@ class Controls:
     def cycles_view(self, cid) -> tuple[str, dict | None]:
         b = self.bot
         lines = ["⏱ <b>How often each store is checked</b>", ""]
-        for s in b.stores:
+        admin = self.users.is_admin(cid)
+        for s in self._stores(cid):
             full, fast = b.base_intervals(s)
             dfull, dfast = b.default_intervals(s)
             extra = f" · priority cards every <b>{fmt_secs(fast)}</b>" if b.has_fast(s) else ""
@@ -291,12 +318,12 @@ class Controls:
             lines.append(f"• <b>{html.escape(s.name)}</b>: every <b>{fmt_secs(full)}</b>{extra}{changed}")
             act = b.burst_active(s)
             if act:
-                lines.append(f"    ⚡ <b>burst now</b> until {act[1] // 60:02d}:{act[1] % 60:02d} IST: every "
-                             f"<b>{fmt_secs(b.burst_seconds(s))}</b> ({act[2]})")
+                lines.append(f"    ⚡ <b>faster checks now</b> until {act[1] // 60:02d}:{act[1] % 60:02d} IST: every "
+                             f"<b>{fmt_secs(b.burst_seconds(s))}</b>" + (f" ({act[2]})" if admin else ""))
             else:
                 ws = b.burst_windows(s)
                 if ws:
-                    lines.append("    ⚡ burst " + ", ".join(f"{a // 60:02d}:{a % 60:02d}–{z // 60:02d}:{z % 60:02d}"
+                    lines.append("    ⚡ faster checks " + ", ".join(f"{a // 60:02d}:{a % 60:02d}–{z // 60:02d}:{z % 60:02d}"
                                                           for a, z, _ in ws) + " IST")
         if not self.users.is_admin(cid):
             return "\n".join(lines), None
@@ -330,10 +357,12 @@ class Controls:
 
     def status_text(self, cid) -> str:
         muted = self.users.muted(cid)
+        delay = self.users.delay(cid)
         lines = ["📦 <b>In stock right now</b>", ""]
         any_stock = False
-        for s in self.bot.stores:
-            recs = [(k, r) for k, r in self.bot.state.items.items() if r.get("store") == s.id and r.get("in_stock")]
+        for s in self._stores(cid):
+            recs = [(k, r) for k, r in self.bot.state.items.items() if r.get("store") == s.id and r.get("in_stock")
+                    and time.time() - (r.get("last_change") or 0) >= delay]
             err = (self.bot.state.store_errors.get(s.id) or {}).get("count", 0)
             tag = " 🔕" if s.id in muted else ""
             if recs:
@@ -351,9 +380,9 @@ class Controls:
             lines.append("Nothing is in stock at the moment.")
         return "\n".join(lines)
 
-    def history_text(self, days: int = 7) -> str:
-        names = {s.id: s.name for s in self.bot.stores}
-        evs = hist.recent(self.bot.state.history, days * 86400)
+    def history_text(self, days: int = 7, cid=None) -> str:
+        names = {s.id: s.name for s in self._stores(cid)}
+        evs = [e for e in hist.recent(self.bot.state.history, days * 86400) if e["store"] in names]
         if not evs:
             return f"📜 No restocks recorded in the last {days} days."
         lines = [f"📜 <b>Restocks in the last {days} days</b> ({len(evs)})", ""]
@@ -367,19 +396,19 @@ class Controls:
             lines.append(f"…and {len(evs) - 40} older")
         return "\n".join(lines)
 
-    def besttime_text(self) -> str:
-        names = {s.id: s.name for s in self.bot.stores}
-        lines = hist.best_times(self.bot.state.history, names)
+    def besttime_text(self, cid=None) -> str:
+        names = {s.id: s.name for s in self._stores(cid)}
+        lines = hist.best_times([e for e in self.bot.state.history if e["store"] in names], names)
         if not lines:
             return ("⏰ No restocks recorded yet. Once cards come back a few times on different days, "
                     "I'll tell you when each store usually restocks.")
         return "⏰ <b>When stores usually restock</b> (last 30 days)\n\n" + "\n".join(lines) + \
                "\n\n<i>Needs at least 3 restocks on 2+ days per store.</i>"
 
-    def health_text(self) -> str:
+    def health_text(self, cid=None) -> str:
         b = self.bot
         lines = ["🩺 <b>Health</b>", ""]
-        for s in b.stores:
+        for s in self._stores(cid):
             e = b.state.store_errors.get(s.id) or {}
             if e.get("count"):
                 lines.append(f"⚠️ <b>{html.escape(s.name)}</b>: failing ({e['count']} in a row), last OK "
@@ -388,6 +417,8 @@ class Controls:
                 took = f", took {e['took']:.1f}s" if e.get("took") else ""
                 lines.append(f"✅ <b>{html.escape(s.name)}</b>: OK, checked {_ago(e.get('last_ok'))}{took}")
         st = b.state.settings
+        if not self.users.is_admin(cid):
+            return "\n".join(lines)
         lines += ["",
                   f"🤖 Running for {hist.fmt_duration(time.time() - b.started)} · version {html.escape(b.version)}",
                   "🔁 Check cycles: /cycles",
@@ -429,9 +460,12 @@ class Controls:
             "/health: is every store being checked OK\n"
             "/cycles: how often each store is checked\n"
             "/whatsapp, /email: get alerts there too (on/off any time)\n\n"
-            "Owner only: <b>/panel</b> (everything in one place), <b>/groups</b> (post alerts to a group or channel), "
-            "/users, /update, /extension, changing /cycles\n\n"
+            "\n"
             "Turning a store off only stops its messages; it's still checked in the background.")
+
+    HELP_OWNER = ("\n\n🔐 <b>Only you see this</b>\n"
+                  "/panel: everything in one place · /groups: post to groups and channels · /users · /extension · /update\n"
+                  "🔒 Private stores and ⏳ alert delays (in /panel) are invisible to everyone else.")
 
     # -- handling --------------------------------------------------------
     async def handle(self, client, upd: dict) -> None:
@@ -458,7 +492,7 @@ class Controls:
 
         if not self.users.is_allowed(cid):
             if cmd != "/start":
-                await send("🔒 You don't have access yet. Send /start to ask the owner.")
+                await send("🔒 You don't have access yet. Send /start to request it.")
                 return
             name = " ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x) or chat.get("title") or cid
             if chat.get("username"):
@@ -471,7 +505,7 @@ class Controls:
                                    reply_markup={"inline_keyboard": [[
                                        {"text": "✅ Allow", "callback_data": f"u:ok:{cid}"},
                                        {"text": "❌ Deny", "callback_data": f"u:no:{cid}"}]]})
-            await send("👋 Request sent to the bot's owner. You'll get a message once you're approved.")
+            await send("👋 Request sent. You'll get a message once you're approved.")
             return
 
         admin = self.users.is_admin(cid)
@@ -501,11 +535,11 @@ class Controls:
             await send(self.status_text(cid))
         elif cmd == "/history":
             days = int(args[0]) if args and args[0].isdigit() else 7
-            await send(self.history_text(max(1, min(days, 90))))
+            await send(self.history_text(max(1, min(days, 90)), cid))
         elif cmd in ("/besttime", "/best"):
-            await send(self.besttime_text())
+            await send(self.besttime_text(cid))
         elif cmd == "/health":
-            await send(self.health_text())
+            await send(self.health_text(cid))
         elif cmd == "/check":
             wait = 60 - (time.time() - self._last_manual_check)
             if wait > 0:
@@ -534,9 +568,8 @@ class Controls:
             await send("⬆️ Checking for updates…")
             await self.bot.run_update(client, manual_cid=cid)
         elif cmd == "/help":
-            await send(self.HELP)
-        elif cmd in ("/users", "/update", "/extension", "/panel", "/dashboard", "/owner", "/groups", "/group", "/channels"):
-            await send("Only the owner can use that.")
+            await send(self.HELP + (self.HELP_OWNER if admin else ""))
+        # owner-only commands from anyone else: no reply, exactly like an unknown command
 
     async def _on_button(self, client, cq: dict) -> None:
         msg = cq.get("message") or {}
@@ -563,13 +596,19 @@ class Controls:
             return
         if data.startswith("gr:"):
             if not self.users.is_admin(cid):
-                await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
+                await self.tg.answer_callback(client, cq["id"], "Not available")
                 return
             await self.bot.groups.on_button(client, cq, cid, mid, data)
             return
+        if data.startswith("dl:") or data.startswith("pv:"):
+            if not self.users.is_admin(cid):
+                await self.tg.answer_callback(client, cq["id"], "Not available")
+                return
+            await self._on_privilege_button(client, cq, cid, mid, data)
+            return
         if data.startswith("pn:"):
             if not self.users.is_admin(cid):
-                await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
+                await self.tg.answer_callback(client, cq["id"], "Not available")
                 return
             await self._on_panel_button(client, cq, cid, mid, data)
             return
@@ -578,13 +617,13 @@ class Controls:
             return
         if data.startswith("extdv:") or data.startswith("extrv:"):
             if not self.users.is_admin(cid):
-                await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
+                await self.tg.answer_callback(client, cq["id"], "Not available")
                 return
             await self._on_devices_button(client, cq, cid, msg, data)
             return
         if data.startswith("extqr:") and data[6:] in ("dm", "notify", "off"):
             if not self.users.is_admin(cid):
-                await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
+                await self.tg.answer_callback(client, cq["id"], "Not available")
                 return
             await self._set_qr_mode(client, data[6:])
             from . import extension_push as ep
@@ -598,7 +637,7 @@ class Controls:
             return
         if data in ("ext:on", "ext:off"):
             if not self.users.is_admin(cid):
-                await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
+                await self.tg.answer_callback(client, cq["id"], "Not available")
                 return
             await self._set_extension_paused(client, data == "ext:off")
             await self.tg.answer_callback(client, cq["id"], "Extension paused ⏸" if data == "ext:off" else "Extension on ▶")
@@ -610,7 +649,7 @@ class Controls:
             await self.tg.send(client, self._extension_state_text(), chat_ids=[cid])
             return
 
-        ids = {s.id: s.name for s in self.bot.stores}
+        ids = {s.id: s.name for s in self._stores(cid)}
         muted = self.users.muted(cid)
         note = "Updated"
         if data.startswith("t:") and data[2:] in ids:
@@ -635,6 +674,81 @@ class Controls:
             log.info("%s settings: %s", cid, note)
         await self.tg.answer_callback(client, cq["id"], note)
         await self.tg.edit(client, cid, msg.get("message_id"), self.menu_text(cid), self.menu_markup(cid))
+
+    # -- owner privileges: delays + private stores (nobody else can see these) ----
+    def delays_view(self) -> tuple[str, dict]:
+        d = self.bot.state.settings.get("delays") or {}
+        people = [(c, r) for c, r in self.users.active().items() if not r.get("admin")]
+        lines = ["⏳ <b>Alert delays</b> 🔐 <i>only you see this</i>", "",
+                 "You always get alerts <b>instantly</b>. Everyone else waits this long, and only gets cards that "
+                 "are <b>still in stock</b> when the wait is over. Nobody is told there's a delay – /status hides "
+                 "new stock from them for the same time.", "",
+                 f"👥 Other people: <b>{fmt_delay(d.get('users', 0))}</b>",
+                 f"📢 Groups & channels: <b>{fmt_delay(d.get('groups', 0))}</b> <i>(each group can override it in 📢 Groups)</i>"]
+        for c, r in people:
+            if r.get("delay") is not None:
+                lines.append(f"   • {html.escape(r.get('name') or c)}: <b>{fmt_delay(r['delay'])}</b> (own)")
+        rows = [[{"text": "👥 People:", "callback_data": "dl:home"}],
+                [{"text": ("✅ " if int(d.get("users", 0)) == v else "") + fmt_delay(v), "callback_data": f"dl:u:{v}"} for v in DELAY_PRESETS],
+                [{"text": "📢 Groups:", "callback_data": "dl:home"}],
+                [{"text": ("✅ " if int(d.get("groups", 0)) == v else "") + fmt_delay(v), "callback_data": f"dl:g:{v}"} for v in DELAY_PRESETS]]
+        for c, r in people[:15]:
+            rows.append([{"text": f"👤 {r.get('name') or c} · {fmt_delay(self.users.delay(c))}"[:40], "callback_data": f"dl:p:{c}"}])
+        rows.append([{"text": "⬅ Back to panel", "callback_data": "pn:home"}])
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    def person_delay_view(self, pid) -> tuple[str, dict]:
+        r = self.users.get(pid) or {}
+        own = r.get("delay")
+        text = (f"⏳ <b>{html.escape(r.get('name') or pid)}</b>\nAlert delay: <b>{fmt_delay(self.users.delay(pid))}</b>"
+                + ("" if own is not None else " (same as everyone)"))
+        rows = [[{"text": ("✅ " if own is None else "") + "↩ Same as everyone", "callback_data": f"dl:ps:{pid}:d"}],
+                [{"text": ("✅ " if own == v else "") + fmt_delay(v), "callback_data": f"dl:ps:{pid}:{v}"} for v in DELAY_PRESETS],
+                [{"text": "⬅ All delays", "callback_data": "dl:home"}]]
+        return text, {"inline_keyboard": rows}
+
+    def private_view(self) -> tuple[str, dict]:
+        priv = self.users.private()
+        lines = ["🔒 <b>Private stores</b> 🔐 <i>only you see this</i>", "",
+                 "A private store is <b>yours alone</b>: only you get its alerts, and for everyone else it doesn't "
+                 "exist – not in /menu, /status, /history, /besttime, /cycles, reports or groups.",
+                 "Your browser extension keeps working for it.", "",
+                 "Private now: <b>" + (", ".join(self.bot.names[s] for s in priv if s in self.bot.names) or "none") + "</b>"]
+        sb = [{"text": f"{'🔒' if s.id in priv else '🌐'} {s.name}", "callback_data": f"pv:t:{s.id}"} for s in self.bot.stores]
+        rows = [sb[i:i + 2] for i in range(0, len(sb), 2)]
+        rows.append([{"text": "⬅ Back to panel", "callback_data": "pn:home"}])
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    async def _on_privilege_button(self, client, cq, cid, mid, data) -> None:
+        p = data.split(":")
+        st = self.bot.state.settings
+        note = ""
+        if p[0] == "pv":
+            if len(p) == 3 and p[1] == "t" and p[2] in self.bot.names:
+                priv = self.users.private() ^ {p[2]}
+                st["private_stores"] = sorted(priv)
+                note = f"{self.bot.names[p[2]]}: {'private 🔒' if p[2] in priv else 'visible to everyone 🌐'}"
+            text, kb = self.private_view()
+        else:
+            if len(p) == 3 and p[1] in ("u", "g") and p[2].isdigit():
+                st.setdefault("delays", {})["users" if p[1] == "u" else "groups"] = int(p[2])
+                note = f"{'People' if p[1] == 'u' else 'Groups'}: {fmt_delay(int(p[2]))}"
+            if len(p) == 3 and p[1] == "p" and self.users.get(p[2]):
+                text, kb = self.person_delay_view(p[2])
+            elif len(p) == 4 and p[1] == "ps" and self.users.get(p[2]):
+                rec = self.users.all[p[2]]
+                if p[3] == "d":
+                    rec.pop("delay", None)
+                elif p[3].isdigit():
+                    rec["delay"] = int(p[3])
+                note = f"{rec.get('name') or p[2]}: {fmt_delay(self.users.delay(p[2]))}"
+                text, kb = self.person_delay_view(p[2])
+            else:
+                text, kb = self.delays_view()
+        if note:
+            self._save()
+        await self.tg.answer_callback(client, cq["id"], note)
+        await self.tg.edit(client, cid, mid, text, kb)
 
     async def _on_panel_button(self, client, cq, cid, mid, data) -> None:
         from . import extension_push as ep
@@ -731,7 +845,7 @@ class Controls:
             await self.tg.edit(client, cid, msg_id, text, kb)
             return
         if not self.users.is_admin(cid):
-            await self.tg.answer_callback(client, cq["id"], "Only the owner can change this")
+            await self.tg.answer_callback(client, cq["id"], "Not available")
             return
         parts = data.split(":")
         sid = parts[1]
@@ -755,7 +869,7 @@ class Controls:
 
     def _cycle_command(self, cid, args: list[str]) -> str:
         if not self.users.is_admin(cid):
-            return "Only the owner can change check cycles. See them with /cycles."
+            return "See how often each store is checked with /cycles."
         usage = ("Usage: <code>/cycle amazon 2m</code>, <code>/cycle amazon fast 30s</code> "
                  "(or <code>fast off</code>), <code>/cycle amazon default</code>\nStores: "
                  + ", ".join(self.bot.names))
@@ -847,7 +961,7 @@ class Controls:
                         "SMTP_PASSWORD=your-16-letter-app-password</code>\n\n"
                         "For Gmail, the password must be an <b>App Password</b> (Google Account → Security → "
                         "2-Step Verification → App passwords), not your normal password.")
-            return "📧 Email alerts aren't available yet. Ask the bot's owner to set them up."
+            return "📧 Email alerts aren't available yet."
         if sub == "test" and ch:
             ok, d = await mailer.send(ch["address"], "✅ Test from your PSN card bot", "Email alerts work.")
             return "✅ Test sent, check your inbox (and spam)." if ok else f"❌ Failed: <code>{html.escape(d)}</code>"
@@ -1011,7 +1125,7 @@ class Controls:
 
     async def _on_user_button(self, client, cq, cid, data) -> None:
         if not self.users.is_admin(cid):
-            await self.tg.answer_callback(client, cq["id"], "Only the owner can do that")
+            await self.tg.answer_callback(client, cq["id"], "Not available")
             return
         _, action, *rest = data.split(":")
         target = rest[0] if rest else ""
@@ -1040,7 +1154,10 @@ class Controls:
 
     # -- polling loop ----------------------------------------------------
     async def run(self, client, stop: asyncio.Event) -> None:
-        await self.tg.api(client, "setMyCommands", {"commands": COMMANDS})
+        await self.tg.api(client, "setMyCommands", {"commands": COMMANDS})        # everyone
+        for a in self.users.admins:                                               # owner's chat only
+            await self.tg.api(client, "setMyCommands", {"commands": OWNER_COMMANDS[:1] + COMMANDS + OWNER_COMMANDS[1:],
+                                                        "scope": {"type": "chat", "chat_id": int(a) if a.lstrip("-").isdigit() else a}})
         offset = self.bot.state.settings.get("tg_offset")
         while not stop.is_set():
             try:

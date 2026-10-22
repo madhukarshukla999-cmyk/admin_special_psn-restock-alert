@@ -38,7 +38,7 @@ def _values(evs: list[dict]) -> str:
 
 def weekly_text(bot, cid: str, now: float | None = None) -> str:
     now = now or time.time()
-    muted = bot.users.muted(cid)
+    muted = bot.users.muted(cid) | bot.users.hidden(cid)
     week = [e for e in hist.recent(bot.state.history, 7 * 86400, now) if e["store"] not in muted]
     prev = [e for e in bot.state.history if now - 14 * 86400 <= e["start"] < now - 7 * 86400
             and e["store"] not in muted]

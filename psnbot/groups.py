@@ -241,10 +241,6 @@ class Groups:
                 f"Post delay: <b>{self._delay_txt(g)}</b> (hidden – only you see this)\n"
                 "Tap the stores whose restocks should be posted here (✅ = posted, 🔒 = private, never posted).")
 
-    def _delay_txt(self, g: dict) -> str:
-        d = self.delay(g)
-        own = "" if g.get("delay") is not None else " (default)"
-        return ("instant" if not d else f"{d // 60} min" + (f" {d % 60}s" if d % 60 else "") if d >= 60 else f"{d}s") + own
         priv = self.bot.users.private()
         sb = [{"text": f"{'🔒' if s.id in priv else '✅' if s.id in stores else '▫'} {s.name}", "callback_data": f"gr:st:{cid}:{s.id}"} for s in self.bot.stores]
         rows = [sb[i:i + 2] for i in range(0, len(sb), 2)]
@@ -257,6 +253,11 @@ class Groups:
                   {"text": "🚫 Disconnect", "callback_data": f"gr:rm?:{cid}"}],
                  [{"text": "⬅ All groups", "callback_data": "gr:list"}]]
         return text, {"inline_keyboard": rows}
+
+    def _delay_txt(self, g: dict) -> str:
+        d = self.delay(g)
+        own = "" if g.get("delay") is not None else " (default)"
+        return ("instant" if not d else f"{d // 60} min" + (f" {d % 60}s" if d % 60 else "") if d >= 60 else f"{d}s") + own
 
     async def on_button(self, client, cq, cid_owner: str, mid, data: str) -> None:
         parts = data.split(":")

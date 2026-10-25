@@ -9,7 +9,7 @@ fast_interval_seconds: 20      # priority checks (fast_check stores); 0 = off
 # Windows are learned from history (/besttime, needs 3+ restocks on 2+ days) and/or set here.
 burst:
   enabled: true
-  seconds: 10                  # check interval during a burst
+  seconds: 1                  # check interval during a burst
   risky_seconds: 20            # Amazon / Flipkart / Blinkit (they may block very fast checks)
   margin_minutes: 15           # start this much before / end after the learned window
   learn: true
@@ -42,7 +42,7 @@ stores:
     enabled: true
     # One ~12 KB request with live (uncached) stock, so it's safe to check very often.
     # PSN cards here are limited to 1 per order and sell out fast.
-    interval_seconds: 5
+    interval_seconds: 2         # 1 small live request, so safe to check very often
     # "gift card" returns only ~17 products (all 8 PSN values among them) in a single page,
     # so a card can't drop off the results just because of ranking changes.
     search_queries: [gift card]

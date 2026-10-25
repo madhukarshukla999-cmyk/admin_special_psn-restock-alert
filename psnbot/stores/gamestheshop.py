@@ -1,16 +1,68 @@
 from __future__ import annotations
 
+import asyncio
+import time
+
 from ..models import Item, StoreError
 from .base import Store
 
 API = "https://green-api.gamestheshop.com/storefront/products/filter"
+DETAIL = "https://green-api.gamestheshop.com/storefront/products/{}/"
+HEADERS = {"Origin": "https://www.gamestheshop.com", "Referer": "https://www.gamestheshop.com/",
+           "Accept": "application/json, text/plain, */*"}
 
 
 class GamesTheShop(Store):
-    """Uses the storefront search API the website itself calls."""
+    """Uses the storefront search API the website itself calls.
+
+    The search list updates minutes late when a card sells out, while the product page reads live
+    stock. So every card the list calls "In Stock" is double-checked with the product page's own
+    request (storefront/products/<id>/, the selected variant's available_stock), within a request
+    budget that stays under the shop's limit of 100 requests a minute.
+    """
 
     id = "gamestheshop"
     name = "GamesTheShop"
+
+    def __init__(self, cfg, title_filter):
+        super().__init__(cfg, title_filter)
+        self._live: dict[str, tuple[float, bool | None]] = {}   # variant -> (checked at, live in stock)
+
+    async def _live_stock(self, client, product_id: str, variant_id: str) -> bool | None:
+        """Exactly what the product page shows: False = 'Currently Out of Stock'. None = couldn't tell."""
+        try:
+            r = await client.get(DETAIL.format(product_id), headers=HEADERS, timeout=10)
+            if r.status_code != 200:
+                return None
+            d = r.json().get("data") or {}
+        except Exception:  # noqa: BLE001 - keep what the list says this round
+            return None
+        vs = d.get("variants") or []
+        v = next((x for x in vs if x.get("id") == variant_id), vs[0] if vs else None)
+        avail = ((v or {}).get("inventory") or {}).get("available_stock")
+        if avail is not None:
+            return avail > 0
+        return "out of stock" not in (d.get("stock_status") or "").lower()
+
+    async def _verify(self, client, items: list[Item]) -> None:
+        listed = [i for i in items if i.in_stock and i.extra.get("product_id")]
+        for vid in [k for k in self._live if k not in {i.item_id for i in listed}]:
+            self._live.pop(vid)                    # the list says sold out too: nothing to correct
+        if not listed or not self.cfg.get("verify_stock", True):
+            return
+        budget = float(self.cfg.get("verify_per_minute", 50))   # + the list itself, under 100/min
+        gap = max(float(self.cfg.get("verify_min_seconds", 3)), len(listed) * 60 / budget)
+        now = time.time()
+        due = [i for i in listed if now - self._live.get(i.item_id, (0, None))[0] >= gap]
+        results = await asyncio.gather(*(self._live_stock(client, i.extra["product_id"], i.item_id) for i in due))
+        for it, live in zip(due, results):
+            if live is not None:
+                self._live[it.item_id] = (now, live)
+        for it in listed:
+            live = self._live.get(it.item_id, (0, None))[1]
+            if live is False:                      # page says "Currently Out of Stock"
+                it.in_stock = False
+                it.note = ""
 
     async def fetch(self, client):
         headers = {
@@ -59,8 +111,11 @@ class GamesTheShop(Store):
                         price=p.get("sale_price"),
                         mrp=p.get("regular_price"),
                         note=", ".join(notes),
+                        extra={"product_id": p.get("product_id")},
                     )
                 if page >= int(meta.get("totalPages") or 1):
                     break
                 await self.polite_pause()
-        return list(seen.values())
+        items = list(seen.values())
+        await self._verify(client, items)
+        return items

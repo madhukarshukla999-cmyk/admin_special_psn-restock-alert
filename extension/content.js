@@ -399,6 +399,15 @@ const inputLike = (re) => {
   const boxes = [...document.querySelectorAll("input")].filter((i) => vis(i) && !i.disabled && i.type !== "hidden");
   return boxes.find((i) => re.test(fieldText(i, false))) || boxes.find((i) => re.test(fieldText(i, true)));
 };
+function frameInfo() {
+  const boxes = [...document.querySelectorAll("input")].filter((i) => vis(i) && i.type !== "hidden")
+    .map((i) => ({ as: (fieldText(i, true).match(/card ?number|expiry|validity|cvv|cvc|name/i) || ["?"])[0],
+                   max: i.maxLength > 0 ? i.maxLength : undefined, type: i.type }));
+  const frames = [...document.querySelectorAll("iframe")].filter(vis).length;
+  return `[frame ${window === window.top ? "main" : "inner"} ${location.hostname}${location.pathname.slice(0, 18)}`
+       + ` | options: ${JSON.stringify(payOptions())} | boxes: ${JSON.stringify(boxes)} | iframes: ${frames}]`;
+}
+
 function payOptions() {
   return [...document.querySelectorAll("li, button, [role=tab], a")].filter(vis)
     .map((e) => (e.innerText || "").trim().split("\n")[0]).filter((t) => t && t.length < 30).slice(0, 10);
@@ -437,16 +446,34 @@ async function pickSelect(el, value) {
   return true;
 }
 
+// No usable label text? Work it out from the shape of the form: a 16-19 character box is the
+// card number, 5-7 is the expiry, 3-4 (or a password box) is the CVV; otherwise document order.
+function guessCardFields() {
+  const ins = [...document.querySelectorAll("input")].filter((i) => vis(i) && !i.disabled && i.type !== "hidden"
+    && !/search|coupon|promo|otp|email|mobile|phone/i.test(fieldText(i, true)));
+  if (ins.length < 2 || ins.length > 4) return {};
+  const out = {}, left = [...ins];
+  const take = (test) => { const i = left.findIndex(test); return i < 0 ? null : left.splice(i, 1)[0]; };
+  out.cvv = take((i) => i.type === "password" || [3, 4].includes(i.maxLength));
+  out.num = take((i) => i.maxLength >= 16 && i.maxLength <= 23);
+  out.exp = take((i) => [5, 6, 7].includes(i.maxLength));
+  if (!out.num) out.num = take(() => true);                 // first of what's left
+  if (!out.exp) out.exp = take(() => true);
+  if (!out.cvv) out.cvv = take(() => true);
+  return out;
+}
+
 // Fill the card form from the details saved in Options. Never presses Pay.
 async function fillCardForm(card) {
   const filled = [];
-  const num = inputLike(/card ?number|cardnum|cc-number|enter card|^number$/i);
+  const g = guessCardFields();
+  const num = inputLike(/card ?number|cardnum|cc-number|enter card|^number$/i) || g.num;
   if (num && card.number && await typeInto(num, card.number)) filled.push("number");
-  const name = inputLike(/name on card|card ?holder|holder ?name|cardname/i);
+  const name = inputLike(/name on card|card ?holder|holder ?name|cardname/i) || g.name;
   if (name && card.name) { await typeInto(name, card.name); filled.push("name"); }
   if (card.expiry && /^\d{4}$/.test(card.expiry)) {
     const mm = card.expiry.slice(0, 2), yy = card.expiry.slice(2);
-    const one = inputLike(/expiry|validity|exp ?date|valid ?thru|mm\s*\/?\s*yy/i);
+    const one = inputLike(/expiry|validity|exp ?date|valid ?thru|mm\s*\/?\s*yy/i) || g.exp;
     const sels = [...document.querySelectorAll("select")].filter(vis);
     const mSel = sels.find((s) => /month|mm|exp/i.test(s.name + s.id + (s.getAttribute("aria-label") || "")));
     const ySel = sels.find((s) => /year|yy|yyyy/i.test(s.name + s.id + (s.getAttribute("aria-label") || "")));
@@ -455,7 +482,7 @@ async function fillCardForm(card) {
     else if (mSel && ySel && await pickSelect(mSel, mm) && await pickSelect(ySel, yy)) filled.push("expiry");
     else if (mIn && yIn) { await typeInto(mIn, mm); await typeInto(yIn, yy); filled.push("expiry"); }
   }
-  const cvv = inputLike(/cvv|cvc|security code/i);
+  const cvv = inputLike(/cvv|cvc|security code/i) || g.cvv;
   if (cvv && card.cvv) { await typeInto(cvv, card.cvv); filled.push("CVV"); }
   else if (cvv) { cvv.focus(); highlight(cvv.closest("form, li, section, div") || cvv); }
   else if (num) { num.focus(); }
@@ -464,6 +491,9 @@ async function fillCardForm(card) {
 
 let paidPressed = false;
 
+// Paytm card payment. Order matters: if a card is saved in Options we always try to FILL the form
+// first (text-matched boxes, else worked out from the form's shape) – a page where only a CVV box
+// can be identified must not be mistaken for "a saved card is selected".
 async function paytmCard(job, last4) {
   // e.g. "Prepaid, Debit and Credit Cards", "Credit / Debit Card", "Cards"
   const CARD_OPT = /(?:prepaid|debit|credit)[\s,/&a-z]{0,24}cards?\b|^cards?$/i;
@@ -473,38 +503,42 @@ async function paytmCard(job, last4) {
     .sort((a, b) => a.innerText.length - b.innerText.length)[0] || null, 8000);
   if (!tab) return false;
   await step("card", "Paytm: choosing Debit Card…");
+  chrome.runtime.sendMessage({ type: "claim", what: "cardflow" }).catch(() => {});
   realClick(clickTarget(tab));
-  // a saved card ending in the last 4 digits (Paytm shows e.g. "•••• 7127" / "XXXX XXXX XXXX 7127")
-  let cvv = null;
-  if (last4) {
+
+  const card = await chrome.storage.local.get({ cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "", cardAutoPay: true });
+  const shown = card.cardNumber.slice(-4) || last4;
+
+  // a saved card at Paytm ending in your last 4 digits -> clicking it shows just a CVV box
+  if (last4 && !card.cardNumber) {
     const saved = await find(() => [...document.querySelectorAll("li, label, div, button")]
       .filter((e) => vis(e) && new RegExp(`(?:[x•*\\s-]|^)${last4}\\b`, "i").test(e.innerText || "") && (e.innerText || "").length < 160)
-      .sort((a, b) => a.innerText.length - b.innerText.length)[0] || null, 6000);
-    if (saved) {
-      realClick(clickTarget(saved));
-      cvv = await find(() => inputLike(/cvv|cvc|security code/i), 5000);
-    }
+      .sort((a, b) => a.innerText.length - b.innerText.length)[0] || null, 5000);
+    if (saved) realClick(clickTarget(saved));
   }
-  const card = await chrome.storage.local.get({ cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "", cardAutoPay: true });
-  // no saved card at Paytm: some pages need "Add new card" first, then fill the form ourselves
-  if (!cvv && card.cardNumber) {
+  // some pages need "Add new card" before the form appears
+  if (card.cardNumber) {
     const add = textBox(/^(\+ ?)?(add (a )?new card|use (another|a different) card|enter card details|new card)$/i, 40);
     if (add) { realClick(clickTarget(add)); await sleep(200); }
   }
-  const field = cvv || await find(() => inputLike(/card ?number|cardnum|cc-number|enter card/i) || inputLike(/cvv|cvc|security code/i), 6000);
-  if (!field) return false;
-  highlight(field.closest("form, li, section, div") || field);
-  field.focus();
-  const isCvv = /cvv|cvc|security/i.test([field.placeholder, field.name, field.id, field.getAttribute("aria-label"), field.autocomplete].join(" "));
 
-  let note, ready;
-  if (!isCvv && card.cardNumber) {              // fill the saved details (never presses Pay)
-    const r = await fillCardForm({ number: card.cardNumber, expiry: card.cardExpiry, name: card.cardName, cvv: card.cardCvv });
-    const shown = card.cardNumber.slice(-4);
-    ready = r.cvvLeft ? "cvv" : "pay";
-    // all details in (CVV included) → press Pay Securely. The bank's OTP page comes next;
-    // nothing is charged until you enter that OTP. Never pressed twice.
-    if (!r.cvvLeft && card.cardAutoPay && r.filled.includes("number") && r.filled.includes("CVV") && !paidPressed) {
+  // wait until this frame actually has a card form (named box, or one we can work out by shape)
+  const ready = await find(() => inputLike(/card ?number|cardnum|cc-number|enter card|^number$/i)
+    || guessCardFields().num || inputLike(/cvv|cvc|security code/i), 8000);
+  if (!ready) return false;
+
+  let note, readyState;
+  const r = card.cardNumber ? await fillCardForm({ number: card.cardNumber, expiry: card.cardExpiry,
+                                                   name: card.cardName, cvv: card.cardCvv })
+                            : { filled: [], cvvLeft: false };
+  if (r.filled.includes("number")) {
+    readyState = r.cvvLeft ? "cvv" : "pay";
+    note = `Paytm: card ••${shown} filled (${r.filled.join(", ")}) – `
+         + (r.cvvLeft ? "type the CVV, press Pay, then the OTP." : "press Pay, then enter the OTP.");
+    // everything in, CVV included -> press Pay. The bank's OTP page comes next; nothing is
+    // charged until you enter that OTP. One frame only, once only.
+    if (!r.cvvLeft && card.cardAutoPay && r.filled.includes("CVV") && !paidPressed
+        && await chrome.runtime.sendMessage({ type: "claim", what: "pay" }).catch(() => false)) {
       const payBtn = await find(() => [...document.querySelectorAll("button, input[type=submit], [role=button]")]
         .find((e) => vis(e) && !e.disabled && /^(pay securely|pay now|pay)\b/i.test((e.innerText || e.value || "").trim())
                      && !/upi|wallet|later/i.test((e.innerText || e.value || "").trim())), 6000);
@@ -514,20 +548,23 @@ async function paytmCard(job, last4) {
         const sentP = await chrome.runtime.sendMessage({ type: "qr", card: true, cardReady: "otp", ...paytmDetails() }).catch(() => false);
         await step("otp", `Paytm: card ••${shown} filled, pressed "${label}" – enter the bank OTP in the browser now.`
                           + (sentP ? " (Telegram notified)" : ""), true);
-        watchPayment(false);                   // the result page/text is reported to Telegram
-        realClick(payBtn);                     // → the bank's OTP page; nothing is charged until you enter it
+        watchPayment(false);                 // the result page is reported to Telegram
+        realClick(payBtn);                   // -> bank OTP page; nothing is charged until you enter it
         return true;
       }
     }
-    note = r.filled.length
-      ? `Paytm: card ••${shown} filled (${r.filled.join(", ")}) – ` + (r.cvvLeft ? "type the CVV, press Pay, then the OTP." : "press Pay, then enter the OTP.")
-      : "Paytm: card form open but nothing could be filled – enter the details yourself.";
   } else {
-    ready = isCvv ? "cvv" : "form";
-    note = isCvv ? `Paytm: card ending ${last4} selected – type the CVV, press Pay, then enter the OTP.`
-                 : "Paytm: card form open – enter your debit card details, press Pay, then the OTP.";
+    // nothing could be filled: focus whatever box is there so you can type
+    const cvvBox = inputLike(/cvv|cvc|security code/i) || guessCardFields().cvv;
+    const numBox = inputLike(/card ?number|cardnum|cc-number|enter card|^number$/i) || guessCardFields().num;
+    const box = (card.cardNumber ? numBox || cvvBox : cvvBox || numBox);
+    if (box) { box.focus(); highlight(box.closest("form, li, section, div") || box); }
+    const onlyCvv = box && box === cvvBox && !card.cardNumber;
+    readyState = onlyCvv ? "cvv" : "form";
+    note = onlyCvv ? `Paytm: card ending ${shown || "?"} selected – type the CVV, press Pay, then enter the OTP.`
+                   : `Paytm: card form open but the details couldn't be filled – enter them yourself. ${frameInfo()}`;
   }
-  const sent = await chrome.runtime.sendMessage({ type: "qr", card: true, cardReady: ready, ...paytmDetails() }).catch(() => false);
+  const sent = await chrome.runtime.sendMessage({ type: "qr", card: true, cardReady: readyState, ...paytmDetails() }).catch(() => false);
   await step("card", note + (sent ? " (Telegram notified)" : ""), true);
   watchPayment(false);
   return true;
@@ -543,9 +580,12 @@ async function paytm(job) {
     return step("otp", "Paytm: OTP page open – enter the OTP from your bank to finish.", true);
   }
   const pay = await chrome.storage.local.get({ gtsPayWith: "upi", cardLast4: "" });
-  if (pay.gtsPayWith === "card" && window === window.top) {
+  if (pay.gtsPayWith === "card") {             // runs in the top page and in Paytm's iframes
     if (await paytmCard(job, (pay.cardLast4 || "").replace(/\D/g, "").slice(-4))) return;
-    await log0(`Paytm: couldn't open the debit card option – showing the QR instead. [options seen: ${JSON.stringify(payOptions())}]`);
+    if (await chrome.runtime.sendMessage({ type: "claimed?", what: "cardflow" }).catch(() => false))
+      return;                                  // another frame is handling the card: stay quiet
+    if (window !== window.top) return;          // an iframe with nothing to fill: stay quiet
+    await log0(`Paytm: couldn't open the debit card option – showing the QR instead. ${frameInfo()}`);
   }
   if (o.upiId) {
     // UPI ID: a payment request goes to your UPI app; you approve it there with your PIN.

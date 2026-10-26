@@ -226,7 +226,8 @@ async function sendQrNow(msg, tab) {
     browserType: "", profileName: "", accountName: "", gtsMobile: "", amzMobile: "", gtsAccount: null, amzAccount: null,
     qrTimeoutSec: 120 });
   if (!s.tgQr || !s.tgToken || !s.tgChatId) return false;
-  const notify = s.qrMode === "notify";
+  const card = !!msg.card;
+  const notify = s.qrMode === "notify" || card;           // card: never a QR photo
   const timeoutMs = Math.max(30, Number(s.qrTimeoutSec) || 120) * 1000;
   const job = (await getJobFor(tab.id)) || {};
   const amazon = job.store === "amazon" || /amazon\.in/.test(tab.url || "");
@@ -249,7 +250,11 @@ async function sendQrNow(msg, tab) {
   const accName = acc.name || s.accountName || "";
   const amount = msg.amount || (String(job.title || "").match(/[\d,]{3,}/) || [""])[0];
   const deadline = new Date(Date.now() + timeoutMs).toLocaleTimeString();
-  const head = notify
+  const head = card
+    ? (msg.cardReady === "otp"
+       ? `🔐 ${job.test ? "TEST · " : ""}Card payment of ₹${amount || "?"} started – ENTER THE OTP in the browser`
+       : `💳 ${job.test ? "TEST · " : ""}Debit card payment for ₹${amount || "?"} ready – go to the browser`)
+    : notify
     ? `🔔 ${job.test ? "TEST · " : ""}QR for ₹${amount || "?"} generated – go to the browser and pay`
     : `💳 ${job.test ? "TEST · " : ""}${storeName}: ${job.title || "PSN card"}${amount && !String(job.title || "").includes(amount) ? ` – ₹${amount}` : ""}`;
   const lines = [
@@ -261,8 +266,13 @@ async function sendQrNow(msg, tab) {
     ...(msg.order ? [`🧾 Order: ${msg.order}`] : []),
     `🕒 ${new Date().toLocaleTimeString()}`,
     "",
-    `⏳ PAY WITHIN ${fmtLeft(timeoutMs)} – ${notify ? "the QR on that browser expires" : "this QR is deleted"} at ${deadline}.`,
-    notify ? "Open that browser – the payment tab is in front with the QR highlighted." : "Scan with any UPI app and enter your PIN.",
+    `⏳ PAY WITHIN ${fmtLeft(timeoutMs)} – ${notify ? "the payment page on that browser expires" : "this QR is deleted"} at ${deadline}.`,
+    card ? ({ otp: "Card filled and Pay pressed – enter the bank OTP in that browser to finish. Nothing is charged until you do.",
+               cvv: "Card details filled – type the CVV, press Pay, then enter the bank OTP.",
+               pay: "Card details filled (CVV too) – press Pay, then enter the bank OTP.",
+               form: "Enter your debit card details, press Pay, then the bank OTP." }[msg.cardReady]
+             || "Finish the card payment in the browser.")
+    : notify ? "Open that browser – the payment tab is in front with the QR highlighted." : "Scan with any UPI app and enter your PIN.",
     ...(notify ? [] : ["Same phone: save the image → UPI app → Scan QR → gallery."]),
   ];
   const text = lines.join("\n").slice(0, 1024);
@@ -447,7 +457,9 @@ async function heartbeat(force) {
 async function revokeMe(all) {
   const { setupDone } = await chrome.storage.local.get({ setupDone: false });
   if (setupDone) await reportToOwner(all ? "🚫 Disconnected (all browsers revoked)" : "🚫 This browser was revoked").catch(() => {});
-  await chrome.storage.local.set({ topic: "", tgToken: "", tgChatId: "", setupDone: false, remotePaused: false,
+  // revoked: also wipe the saved card details from this browser
+  await chrome.storage.local.set({ cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "",
+    topic: "", tgToken: "", tgChatId: "", setupDone: false, remotePaused: false,
     revokedAt: Date.now(), deviceId: crypto.randomUUID().replace(/-/g, "").slice(0, 16) });   // a reconnect is a new browser
   for (const [tabId] of await allQrs()) await chrome.storage.local.remove(qrKey(tabId));
   if (ws) { try { ws.close(); } catch { /* ignore */ } }

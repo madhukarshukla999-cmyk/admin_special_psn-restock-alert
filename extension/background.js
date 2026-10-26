@@ -166,6 +166,20 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     })();
     return true;
   }
+  if (msg.type === "claimed?" && sender.tab) {     // has any frame in this tab claimed it?
+    const k = `claim_${sender.tab.id}_${msg.what || "x"}`;
+    chrome.storage.session.get(k).then((o) => reply(!!(o[k] && Date.now() - o[k] < 120000)));
+    return true;
+  }
+  if (msg.type === "claim" && sender.tab) {        // first frame to ask wins, for 2 minutes
+    const k = `claim_${sender.tab.id}_${msg.what || "x"}`;
+    chrome.storage.session.get(k).then(async (o) => {
+      if (o[k] && Date.now() - o[k] < 120000) return reply(false);
+      await chrome.storage.session.set({ [k]: Date.now() });
+      reply(true);
+    });
+    return true;
+  }
   if (msg.type === "qr" && sender.tab) { sendQr(msg, sender.tab).then((ok) => reply(ok)); return true; }
   if (msg.type === "watch?" && sender.tab) {
     chrome.storage.local.get(qrKey(sender.tab.id)).then((o) => {

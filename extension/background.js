@@ -251,7 +251,9 @@ async function sendQrNow(msg, tab) {
   const amount = msg.amount || (String(job.title || "").match(/[\d,]{3,}/) || [""])[0];
   const deadline = new Date(Date.now() + timeoutMs).toLocaleTimeString();
   const head = card
-    ? `💳 ${job.test ? "TEST · " : ""}Debit card payment for ₹${amount || "?"} ready – go to the browser`
+    ? (msg.cardReady === "otp"
+       ? `🔐 ${job.test ? "TEST · " : ""}Card payment of ₹${amount || "?"} started – ENTER THE OTP in the browser`
+       : `💳 ${job.test ? "TEST · " : ""}Debit card payment for ₹${amount || "?"} ready – go to the browser`)
     : notify
     ? `🔔 ${job.test ? "TEST · " : ""}QR for ₹${amount || "?"} generated – go to the browser and pay`
     : `💳 ${job.test ? "TEST · " : ""}${storeName}: ${job.title || "PSN card"}${amount && !String(job.title || "").includes(amount) ? ` – ₹${amount}` : ""}`;
@@ -265,7 +267,8 @@ async function sendQrNow(msg, tab) {
     `🕒 ${new Date().toLocaleTimeString()}`,
     "",
     `⏳ PAY WITHIN ${fmtLeft(timeoutMs)} – ${notify ? "the payment page on that browser expires" : "this QR is deleted"} at ${deadline}.`,
-    card ? ({ cvv: "Card details filled – type the CVV, press Pay, then enter the bank OTP.",
+    card ? ({ otp: "Card filled and Pay pressed – enter the bank OTP in that browser to finish. Nothing is charged until you do.",
+               cvv: "Card details filled – type the CVV, press Pay, then enter the bank OTP.",
                pay: "Card details filled (CVV too) – press Pay, then enter the bank OTP.",
                form: "Enter your debit card details, press Pay, then the bank OTP." }[msg.cardReady]
              || "Finish the card payment in the browser.")

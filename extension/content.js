@@ -376,8 +376,29 @@ function textBox(re, maxLen = 60) {
     .filter((e) => vis(e) && (e.innerText || "").trim().length <= maxLen && re.test((e.innerText || "").trim()))
     .sort((a, b) => a.innerText.length - b.innerText.length)[0] || null;
 }
-const inputLike = (re) => [...document.querySelectorAll("input")].find((i) => vis(i) && !i.disabled &&
-  re.test([i.placeholder, i.name, i.id, i.getAttribute("aria-label"), i.autocomplete, i.getAttribute("data-testid")].join(" ")));
+// What a field is called. Paytm uses floating labels, not placeholders, so look at the label
+// elements and the text right next to the box as well.
+function fieldText(i, loose) {
+  const bits = [i.placeholder, i.name, i.id, i.getAttribute("aria-label"), i.autocomplete, i.getAttribute("data-testid")];
+  if (i.id) { try { const l = document.querySelector(`label[for="${CSS.escape(i.id)}"]`); if (l) bits.push(l.innerText); } catch { /* ignore */ } }
+  const wrap = i.closest("label"); if (wrap) bits.push(wrap.innerText);
+  const by = i.getAttribute("aria-labelledby");
+  if (by) by.split(/\s+/).forEach((id) => { const e = document.getElementById(id); if (e) bits.push(e.innerText); });
+  if (loose) {                                  // floating label / text in the same little box
+    const p = i.parentElement;
+    if (p) {
+      bits.push([...p.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join(" "));
+      bits.push(...[...p.querySelectorAll("label, span, div, p")].slice(0, 4).map((e) => e.innerText || ""));
+    }
+    for (let s = i.previousElementSibling, k = 0; s && k < 2; s = s.previousElementSibling, k++) bits.push(s.innerText || "");
+  }
+  return bits.filter(Boolean).join(" ").slice(0, 300);
+}
+// tight match first (the box's own name), then loose (nearby label text)
+const inputLike = (re) => {
+  const boxes = [...document.querySelectorAll("input")].filter((i) => vis(i) && !i.disabled && i.type !== "hidden");
+  return boxes.find((i) => re.test(fieldText(i, false))) || boxes.find((i) => re.test(fieldText(i, true)));
+};
 function payOptions() {
   return [...document.querySelectorAll("li, button, [role=tab], a")].filter(vis)
     .map((e) => (e.innerText || "").trim().split("\n")[0]).filter((t) => t && t.length < 30).slice(0, 10);
@@ -425,7 +446,7 @@ async function fillCardForm(card) {
   if (name && card.name) { await typeInto(name, card.name); filled.push("name"); }
   if (card.expiry && /^\d{4}$/.test(card.expiry)) {
     const mm = card.expiry.slice(0, 2), yy = card.expiry.slice(2);
-    const one = inputLike(/expiry|exp ?date|valid ?thru|mm\s*\/?\s*yy/i);
+    const one = inputLike(/expiry|validity|exp ?date|valid ?thru|mm\s*\/?\s*yy/i);
     const sels = [...document.querySelectorAll("select")].filter(vis);
     const mSel = sels.find((s) => /month|mm|exp/i.test(s.name + s.id + (s.getAttribute("aria-label") || "")));
     const ySel = sels.find((s) => /year|yy|yyyy/i.test(s.name + s.id + (s.getAttribute("aria-label") || "")));
@@ -441,8 +462,15 @@ async function fillCardForm(card) {
   return { filled, cvvLeft: !!(cvv && !card.cvv) };
 }
 
+let paidPressed = false;
+
 async function paytmCard(job, last4) {
-  const tab = await find(() => textBox(/^(debit card|credit\s*\/\s*debit card|debit\s*\/\s*credit card|cards?|debit\s*&\s*credit cards?|debit\s*or\s*credit card)$/i), 6000);
+  // e.g. "Prepaid, Debit and Credit Cards", "Credit / Debit Card", "Cards"
+  const CARD_OPT = /(?:prepaid|debit|credit)[\s,/&a-z]{0,24}cards?\b|^cards?$/i;
+  const tab = await find(() => [...document.querySelectorAll("div, li, button, a, span, p, h3, h4, [role=button], [role=tab]")]
+    .filter((e) => vis(e) && CARD_OPT.test((e.innerText || "").trim()) && (e.innerText || "").trim().length < 70
+                   && !/upi|net ?banking|emi|wallet/i.test((e.innerText || "").trim()))
+    .sort((a, b) => a.innerText.length - b.innerText.length)[0] || null, 8000);
   if (!tab) return false;
   await step("card", "Paytm: choosing Debit Card…");
   realClick(clickTarget(tab));
@@ -457,7 +485,7 @@ async function paytmCard(job, last4) {
       cvv = await find(() => inputLike(/cvv|cvc|security code/i), 5000);
     }
   }
-  const card = await chrome.storage.local.get({ cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "" });
+  const card = await chrome.storage.local.get({ cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "", cardAutoPay: true });
   // no saved card at Paytm: some pages need "Add new card" first, then fill the form ourselves
   if (!cvv && card.cardNumber) {
     const add = textBox(/^(\+ ?)?(add (a )?new card|use (another|a different) card|enter card details|new card)$/i, 40);
@@ -474,6 +502,23 @@ async function paytmCard(job, last4) {
     const r = await fillCardForm({ number: card.cardNumber, expiry: card.cardExpiry, name: card.cardName, cvv: card.cardCvv });
     const shown = card.cardNumber.slice(-4);
     ready = r.cvvLeft ? "cvv" : "pay";
+    // all details in (CVV included) → press Pay Securely. The bank's OTP page comes next;
+    // nothing is charged until you enter that OTP. Never pressed twice.
+    if (!r.cvvLeft && card.cardAutoPay && r.filled.includes("number") && r.filled.includes("CVV") && !paidPressed) {
+      const payBtn = await find(() => [...document.querySelectorAll("button, input[type=submit], [role=button]")]
+        .find((e) => vis(e) && !e.disabled && /^(pay securely|pay now|pay)\b/i.test((e.innerText || e.value || "").trim())
+                     && !/upi|wallet|later/i.test((e.innerText || e.value || "").trim())), 6000);
+      if (payBtn) {
+        paidPressed = true;
+        const label = (payBtn.innerText || payBtn.value || "Pay").trim().slice(0, 24);
+        const sentP = await chrome.runtime.sendMessage({ type: "qr", card: true, cardReady: "otp", ...paytmDetails() }).catch(() => false);
+        await step("otp", `Paytm: card ••${shown} filled, pressed "${label}" – enter the bank OTP in the browser now.`
+                          + (sentP ? " (Telegram notified)" : ""), true);
+        watchPayment(false);                   // the result page/text is reported to Telegram
+        realClick(payBtn);                     // → the bank's OTP page; nothing is charged until you enter it
+        return true;
+      }
+    }
     note = r.filled.length
       ? `Paytm: card ••${shown} filled (${r.filled.join(", ")}) – ` + (r.cvvLeft ? "type the CVV, press Pay, then the OTP." : "press Pay, then enter the OTP.")
       : "Paytm: card form open but nothing could be filled – enter the details yourself.";
@@ -488,8 +533,15 @@ async function paytmCard(job, last4) {
   return true;
 }
 
+const otpPage = () => document.body && /one[- ]time password|\botp\b|3d ?secure|verified by|authenticat/i.test(document.body.innerText || "")
+  && [...document.querySelectorAll("input")].some((i) => vis(i) && /otp|code|password/i.test(fieldText(i, true)));
+
 async function paytm(job) {
   const o = await opts();
+  if (otpPage()) {                             // payment already started: just watch for the result
+    watchPayment(true);
+    return step("otp", "Paytm: OTP page open – enter the OTP from your bank to finish.", true);
+  }
   const pay = await chrome.storage.local.get({ gtsPayWith: "upi", cardLast4: "" });
   if (pay.gtsPayWith === "card" && window === window.top) {
     if (await paytmCard(job, (pay.cardLast4 || "").replace(/\D/g, "").slice(-4))) return;

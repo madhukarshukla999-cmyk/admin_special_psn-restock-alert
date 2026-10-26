@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const DEFAULTS = {
   topic: "", server: "https://ntfy.sh", enabled: true, autoClick: true, sound: true, maxPrice: 0, clickPayNow: true,
-  amazonUpiQr: true, upiId: "", tgQr: true, tgToken: "", tgChatId: "", browserName: "", gtsMobile: "", qrTimeoutSec: 120, qrMode: "dm", amzMobile: "", gtsPayWith: "upi", cardLast4: "", cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "",
+  amazonUpiQr: true, upiId: "", tgQr: true, tgToken: "", tgChatId: "", browserName: "", gtsMobile: "", qrTimeoutSec: 120, qrMode: "dm", amzMobile: "", gtsPayWith: "upi", cardLast4: "", cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "", cardAutoPay: true,
   browserType: "", profileName: "", accountName: "", setupDone: false, remotePaused: false,
   stores: { gamestheshop: true, amazon: true, others: true },
 };
@@ -98,7 +98,7 @@ async function load() {
   const mode = !s.tgQr ? "off" : s.qrMode || "dm";
   for (const r of document.querySelectorAll('input[name="qrMode"]')) r.checked = r.value === mode;
   $("amzMobile").value = s.amzMobile || ""; $("gtsPayWith").value = s.gtsPayWith || "upi"; $("cardLast4").value = s.cardLast4 || "";
-  $("cardNumber").value = s.cardNumber || ""; $("cardName").value = s.cardName || ""; $("cardCvv").value = s.cardCvv || "";
+  $("cardAutoPay").checked = s.cardAutoPay; $("cardNumber").value = s.cardNumber || ""; $("cardName").value = s.cardName || ""; $("cardCvv").value = s.cardCvv || "";
   $("cardExpiry").value = s.cardExpiry ? s.cardExpiry.slice(0, 2) + "/" + s.cardExpiry.slice(2) : "";
   $("cardSaved").textContent = s.cardNumber ? `– saved ••${s.cardNumber.slice(-4)}${s.cardExpiry ? " · " + s.cardExpiry.slice(0, 2) + "/" + s.cardExpiry.slice(2) : ""}${s.cardCvv ? " · CVV stored" : ""}`
                                             : "– not set"; $("amzName").value = (s.amzAccount && s.amzAccount.name) || ""; $("qrTimeoutSec").value = s.qrTimeoutSec || 120; $("gtsMobile").value = s.gtsMobile || "";
@@ -187,7 +187,7 @@ $("save").onclick = async () => {
     maxPrice: Number($("maxPrice").value) || 0, clickPayNow: $("clickPayNow").checked, amazonUpiQr: $("amazonUpiQr").checked,
     tgQr: qrModeVal() !== "off", qrMode: qrModeVal() === "off" ? "dm" : qrModeVal(), amzMobile: mobileOf($("amzMobile").value), gtsPayWith: $("gtsPayWith").value,
     cardNumber: $("cardNumber").value.replace(/\D/g, ""), cardExpiry: $("cardExpiry").value.replace(/\D/g, "").slice(0, 4),
-    cardName: $("cardName").value.trim(), cardCvv: $("cardCvv").value.replace(/\D/g, ""),
+    cardName: $("cardName").value.trim(), cardCvv: $("cardCvv").value.replace(/\D/g, ""), cardAutoPay: $("cardAutoPay").checked,
     cardLast4: ($("cardNumber").value.replace(/\D/g, "") || $("cardLast4").value).slice(-4), qrTimeoutSec: Math.max(30, Number($("qrTimeoutSec").value) || 120),
     gtsMobile: mobileOf($("gtsMobile").value), upiId: $("upiId").value.trim(),
     stores: { gamestheshop: $("st_gamestheshop").checked, amazon: $("st_amazon").checked, others: $("st_others").checked },

@@ -113,6 +113,8 @@
       <label class="field">CVV <span class="hint inline">optional</span>
         <input type="password" id="cardCvv" inputmode="numeric" autocomplete="off" maxlength="4" placeholder="leave empty = type it each time"></label>
     </div>
+    <label class="switch"><input type="checkbox" id="cardAutoPay"><span></span><i class="lbl">Press <b>Pay Securely</b> automatically <span class="hint inline">only when the CVV is saved too</span></i></label>
+    <p class="muted small">That takes you to your bank's OTP page. <b>Nothing is charged until you enter the OTP.</b></p>
     <div class="banner warn small">⚠ These details are stored <b>only in this browser profile</b>, unencrypted. Anyone who can use this computer could read them. Leaving <b>CVV empty</b> is safer: nobody can pay with the card without it. They're wiped if you revoke this browser from Telegram.</div>
     <button class="btn ghost small" id="cardClear" type="button">Clear card details</button>
   </details>

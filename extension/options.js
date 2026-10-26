@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const DEFAULTS = {
   topic: "", server: "https://ntfy.sh", enabled: true, autoClick: true, sound: true, maxPrice: 0, clickPayNow: true,
-  amazonUpiQr: true, upiId: "", tgQr: true, tgToken: "", tgChatId: "", browserName: "", gtsMobile: "", qrTimeoutSec: 120, qrMode: "dm", amzMobile: "",
+  amazonUpiQr: true, upiId: "", tgQr: true, tgToken: "", tgChatId: "", browserName: "", gtsMobile: "", qrTimeoutSec: 120, qrMode: "dm", amzMobile: "", gtsPayWith: "upi", cardLast4: "", cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "",
   browserType: "", profileName: "", accountName: "", setupDone: false, remotePaused: false,
   stores: { gamestheshop: true, amazon: true, others: true },
 };
@@ -97,7 +97,11 @@ async function load() {
   $("tgQr").checked = s.tgQr;
   const mode = !s.tgQr ? "off" : s.qrMode || "dm";
   for (const r of document.querySelectorAll('input[name="qrMode"]')) r.checked = r.value === mode;
-  $("amzMobile").value = s.amzMobile || ""; $("amzName").value = (s.amzAccount && s.amzAccount.name) || ""; $("qrTimeoutSec").value = s.qrTimeoutSec || 120; $("gtsMobile").value = s.gtsMobile || "";
+  $("amzMobile").value = s.amzMobile || ""; $("gtsPayWith").value = s.gtsPayWith || "upi"; $("cardLast4").value = s.cardLast4 || "";
+  $("cardNumber").value = s.cardNumber || ""; $("cardName").value = s.cardName || ""; $("cardCvv").value = s.cardCvv || "";
+  $("cardExpiry").value = s.cardExpiry ? s.cardExpiry.slice(0, 2) + "/" + s.cardExpiry.slice(2) : "";
+  $("cardSaved").textContent = s.cardNumber ? `– saved ••${s.cardNumber.slice(-4)}${s.cardExpiry ? " · " + s.cardExpiry.slice(0, 2) + "/" + s.cardExpiry.slice(2) : ""}${s.cardCvv ? " · CVV stored" : ""}`
+                                            : "– not set"; $("amzName").value = (s.amzAccount && s.amzAccount.name) || ""; $("qrTimeoutSec").value = s.qrTimeoutSec || 120; $("gtsMobile").value = s.gtsMobile || "";
   $("gtsMobile").placeholder = acc && acc.mobile ? `auto: +91 ${acc.mobile}` : "auto-detected";
   $("upiId").value = s.upiId || "";
   for (const k of ["gamestheshop", "amazon", "others"]) $("st_" + k).checked = s.stores[k];
@@ -181,7 +185,10 @@ $("save").onclick = async () => {
   await chrome.storage.local.set({
     enabled: $("enabled").checked, autoClick: $("autoClick").checked, sound: $("sound").checked,
     maxPrice: Number($("maxPrice").value) || 0, clickPayNow: $("clickPayNow").checked, amazonUpiQr: $("amazonUpiQr").checked,
-    tgQr: qrModeVal() !== "off", qrMode: qrModeVal() === "off" ? "dm" : qrModeVal(), amzMobile: mobileOf($("amzMobile").value), qrTimeoutSec: Math.max(30, Number($("qrTimeoutSec").value) || 120),
+    tgQr: qrModeVal() !== "off", qrMode: qrModeVal() === "off" ? "dm" : qrModeVal(), amzMobile: mobileOf($("amzMobile").value), gtsPayWith: $("gtsPayWith").value,
+    cardNumber: $("cardNumber").value.replace(/\D/g, ""), cardExpiry: $("cardExpiry").value.replace(/\D/g, "").slice(0, 4),
+    cardName: $("cardName").value.trim(), cardCvv: $("cardCvv").value.replace(/\D/g, ""),
+    cardLast4: ($("cardNumber").value.replace(/\D/g, "") || $("cardLast4").value).slice(-4), qrTimeoutSec: Math.max(30, Number($("qrTimeoutSec").value) || 120),
     gtsMobile: mobileOf($("gtsMobile").value), upiId: $("upiId").value.trim(),
     stores: { gamestheshop: $("st_gamestheshop").checked, amazon: $("st_amazon").checked, others: $("st_others").checked },
   });
@@ -204,6 +211,20 @@ $("allowShots").onclick = async () => {
   $("allowShots").textContent = ok ? "Screenshots allowed ✓" : "Not allowed";
 };
 chrome.permissions.contains({ origins: ["<all_urls>"] }).then((ok) => { if (ok) $("allowShots").textContent = "Screenshots allowed ✓"; });
+
+$("cardClear").onclick = async () => {
+  await chrome.storage.local.set({ cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "" });
+  for (const id of ["cardNumber", "cardExpiry", "cardName", "cardCvv"]) $(id).value = "";
+  $("cardClear").textContent = "Cleared ✓"; setTimeout(() => ($("cardClear").textContent = "Clear card details"), 1500);
+};
+$("cardExpiry").addEventListener("input", (e) => {       // 1227 -> 12/27 as you type
+  const d = e.target.value.replace(/\D/g, "").slice(0, 4);
+  e.target.value = d.length > 2 ? d.slice(0, 2) + "/" + d.slice(2) : d;
+});
+for (const id of ["cardNumber", "cardExpiry", "cardName", "cardCvv", "cardLast4"]) {
+  $(id).addEventListener("focus", () => (typing = true));
+  $(id).addEventListener("blur", () => { typing = false; });
+}
 
 chrome.storage.onChanged.addListener(() => load());
 load();

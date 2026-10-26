@@ -91,6 +91,13 @@
 <section class="card">
   <h2>⚡ When a card is back</h2>
   <label class="switch"><input type="checkbox" id="autoClick"><span></span><i class="lbl">Click through to checkout</i></label>
+  <div class="grid2">
+    <label class="field">GamesTheShop: pay with
+      <select id="gtsPayWith"><option value="upi">📷 UPI QR</option><option value="card">💳 Debit card</option></select></label>
+    <label class="field">Debit card – last 4 digits <span class="hint inline">to pick your saved card</span>
+      <input type="text" id="cardLast4" maxlength="4" inputmode="numeric" placeholder="e.g. 7127"></label>
+  </div>
+  <p class="muted small">💳 Debit card: the extension opens Paytm's card option, selects your saved card and puts the cursor in the CVV box. You type the CVV and the bank OTP – your card number and CVV are never stored.</p>
   <label class="switch"><input type="checkbox" id="clickPayNow"><span></span><i class="lbl">GamesTheShop: click <b>Pay Now</b> (Paytm QR)</i></label>
   <label class="switch"><input type="checkbox" id="amazonUpiQr"><span></span><i class="lbl">Amazon: pay with <b>UPI QR</b></i></label>
   <div class="chips">

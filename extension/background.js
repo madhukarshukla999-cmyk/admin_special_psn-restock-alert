@@ -226,7 +226,8 @@ async function sendQrNow(msg, tab) {
     browserType: "", profileName: "", accountName: "", gtsMobile: "", amzMobile: "", gtsAccount: null, amzAccount: null,
     qrTimeoutSec: 120 });
   if (!s.tgQr || !s.tgToken || !s.tgChatId) return false;
-  const notify = s.qrMode === "notify";
+  const card = !!msg.card;
+  const notify = s.qrMode === "notify" || card;           // card: never a QR photo
   const timeoutMs = Math.max(30, Number(s.qrTimeoutSec) || 120) * 1000;
   const job = (await getJobFor(tab.id)) || {};
   const amazon = job.store === "amazon" || /amazon\.in/.test(tab.url || "");
@@ -249,7 +250,9 @@ async function sendQrNow(msg, tab) {
   const accName = acc.name || s.accountName || "";
   const amount = msg.amount || (String(job.title || "").match(/[\d,]{3,}/) || [""])[0];
   const deadline = new Date(Date.now() + timeoutMs).toLocaleTimeString();
-  const head = notify
+  const head = card
+    ? `💳 ${job.test ? "TEST · " : ""}Debit card payment for ₹${amount || "?"} ready – go to the browser`
+    : notify
     ? `🔔 ${job.test ? "TEST · " : ""}QR for ₹${amount || "?"} generated – go to the browser and pay`
     : `💳 ${job.test ? "TEST · " : ""}${storeName}: ${job.title || "PSN card"}${amount && !String(job.title || "").includes(amount) ? ` – ₹${amount}` : ""}`;
   const lines = [
@@ -261,8 +264,10 @@ async function sendQrNow(msg, tab) {
     ...(msg.order ? [`🧾 Order: ${msg.order}`] : []),
     `🕒 ${new Date().toLocaleTimeString()}`,
     "",
-    `⏳ PAY WITHIN ${fmtLeft(timeoutMs)} – ${notify ? "the QR on that browser expires" : "this QR is deleted"} at ${deadline}.`,
-    notify ? "Open that browser – the payment tab is in front with the QR highlighted." : "Scan with any UPI app and enter your PIN.",
+    `⏳ PAY WITHIN ${fmtLeft(timeoutMs)} – ${notify ? "the payment page on that browser expires" : "this QR is deleted"} at ${deadline}.`,
+    card ? (msg.cardReady === "cvv" ? "Your saved card is selected – type the CVV, press Pay, then enter the bank OTP."
+                                    : "Enter your debit card details, press Pay, then the bank OTP.")
+    : notify ? "Open that browser – the payment tab is in front with the QR highlighted." : "Scan with any UPI app and enter your PIN.",
     ...(notify ? [] : ["Same phone: save the image → UPI app → Scan QR → gallery."]),
   ];
   const text = lines.join("\n").slice(0, 1024);

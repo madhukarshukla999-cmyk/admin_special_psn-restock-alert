@@ -495,3 +495,26 @@ async function reportPurchase(q, msg) {
   await fetch(`${s.server.replace(/\/+$/, "")}/${encodeURIComponent(s.topic)}-hb`,
     { method: "POST", body: JSON.stringify(body), headers: { Tags: "psnbuy" } });
 }
+
+// If one of our tabs lands on a payment page and the extension can't act there (not allowed on
+// that address, or nothing recognised), say so in the log with the address – otherwise it just
+// looks like nothing happened.
+const watchedPages = new Set();
+chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+  if (info.status !== "complete" || !tab.url || !/^https:/.test(tab.url)) return;
+  let host;
+  try { host = new URL(tab.url).hostname; } catch { return; }
+  if (/gamestheshop\.com|amazon\.in|ntfy\.sh/.test(host)) return;      // store pages, handled elsewhere
+  if (!(await getJobFor(tabId))) return;                               // not a tab we opened
+  const key = tabId + host;
+  if (watchedPages.has(key)) return;
+  watchedPages.add(key);
+  setTimeout(async () => {
+    const job = await getJobFor(tabId);
+    if (!job || ["card", "choosing", "chosen", "paying", "otp", "qr", "upi", "paid"].includes(job.step)) return;
+    const reached = await chrome.tabs.sendMessage(tabId, { type: "ping" }).catch(() => null);
+    await log(reached
+      ? `⚠ Nothing recognised on ${host} – open Options and send the developer this address.`
+      : `⚠ The extension isn't allowed to run on ${host} – that page can't be filled. Send the developer this address.`);
+  }, 15000);
+});

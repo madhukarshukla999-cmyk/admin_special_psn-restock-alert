@@ -4,6 +4,11 @@
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// lets the background check which pages/frames the extension can actually reach
+chrome.runtime.onMessage.addListener((m, s, reply) => {
+  if (m && m.type === "ping") { reply({ host: location.hostname, top: window === window.top }); return true; }
+});
+
 // GamesTheShop is a Next.js app: BUY NOW / Pay Now change the URL without a page load, so this
 // script isn't re-injected. We watch the URL ourselves and stop any wait once the page moved on.
 let href = location.href;
@@ -778,7 +783,7 @@ async function getJob() {
   if (window === window.top) {             // a tab whose QR is still waiting: watch it for the result
     chrome.runtime.sendMessage({ type: "watch?" }).then((w) => { if (w) watchPayment(true); }).catch(() => {});
   }
-  const isPaytm = host.endsWith("paytmpayments.com") || host.endsWith("paytm.in");
+  const isPaytm = /(^|\.)paytm(payments)?\.(in|com)$/.test(host);
   const isAmazon = host === "amazon.in" || host.endsWith(".amazon.in");
   if (window !== window.top) {
     // iframes: Paytm runs fully; Amazon's payment-list frame only selects UPI; others do nothing

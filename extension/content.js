@@ -383,6 +383,64 @@ function payOptions() {
     .map((e) => (e.innerText || "").trim().split("\n")[0]).filter((t) => t && t.length < 30).slice(0, 10);
 }
 
+// Type into a field the way a person would, one character at a time, so Paytm's formatted
+// boxes (spaces after every 4 digits, the "/" in MM/YY) accept it. Returns true if the digits landed.
+async function typeInto(el, text) {
+  const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value").set;
+  el.focus();
+  set.call(el, "");
+  el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+  for (const ch of text) {
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: ch, bubbles: true }));
+    set.call(el, el.value + ch);                 // read back: the box may reformat as it goes
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch, inputType: "insertText" }));
+    el.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
+    await sleep(10);
+  }
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+  const got = (el.value || "").replace(/\D/g, "");
+  if (got === text) return true;
+  setValue(el, text);                            // last resort: set it in one go
+  return (el.value || "").replace(/\D/g, "") === text;
+}
+
+async function pickSelect(el, value) {
+  const want = String(value);
+  const opt = [...el.options].find((o) => {
+    const v = (o.value || "").replace(/\D/g, ""), t = (o.text || "").replace(/\D/g, "");
+    return v === want || t === want || v.slice(-2) === want.slice(-2) || t.slice(-2) === want.slice(-2);
+  });
+  if (!opt) return false;
+  el.value = opt.value;
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+  return true;
+}
+
+// Fill the card form from the details saved in Options. Never presses Pay.
+async function fillCardForm(card) {
+  const filled = [];
+  const num = inputLike(/card ?number|cardnum|cc-number|enter card|^number$/i);
+  if (num && card.number && await typeInto(num, card.number)) filled.push("number");
+  const name = inputLike(/name on card|card ?holder|holder ?name|cardname/i);
+  if (name && card.name) { await typeInto(name, card.name); filled.push("name"); }
+  if (card.expiry && /^\d{4}$/.test(card.expiry)) {
+    const mm = card.expiry.slice(0, 2), yy = card.expiry.slice(2);
+    const one = inputLike(/expiry|exp ?date|valid ?thru|mm\s*\/?\s*yy/i);
+    const sels = [...document.querySelectorAll("select")].filter(vis);
+    const mSel = sels.find((s) => /month|mm|exp/i.test(s.name + s.id + (s.getAttribute("aria-label") || "")));
+    const ySel = sels.find((s) => /year|yy|yyyy/i.test(s.name + s.id + (s.getAttribute("aria-label") || "")));
+    const mIn = inputLike(/^(exp)?m{2}$|month/i), yIn = inputLike(/^(exp)?y{2,4}$|year/i);
+    if (one && await typeInto(one, mm + yy)) filled.push("expiry");
+    else if (mSel && ySel && await pickSelect(mSel, mm) && await pickSelect(ySel, yy)) filled.push("expiry");
+    else if (mIn && yIn) { await typeInto(mIn, mm); await typeInto(yIn, yy); filled.push("expiry"); }
+  }
+  const cvv = inputLike(/cvv|cvc|security code/i);
+  if (cvv && card.cvv) { await typeInto(cvv, card.cvv); filled.push("CVV"); }
+  else if (cvv) { cvv.focus(); highlight(cvv.closest("form, li, section, div") || cvv); }
+  else if (num) { num.focus(); }
+  return { filled, cvvLeft: !!(cvv && !card.cvv) };
+}
+
 async function paytmCard(job, last4) {
   const tab = await find(() => textBox(/^(debit card|credit\s*\/\s*debit card|debit\s*\/\s*credit card|cards?|debit\s*&\s*credit cards?|debit\s*or\s*credit card)$/i), 6000);
   if (!tab) return false;
@@ -399,15 +457,33 @@ async function paytmCard(job, last4) {
       cvv = await find(() => inputLike(/cvv|cvc|security code/i), 5000);
     }
   }
-  // no saved card: start at the card number box
+  const card = await chrome.storage.local.get({ cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "" });
+  // no saved card at Paytm: some pages need "Add new card" first, then fill the form ourselves
+  if (!cvv && card.cardNumber) {
+    const add = textBox(/^(\+ ?)?(add (a )?new card|use (another|a different) card|enter card details|new card)$/i, 40);
+    if (add) { realClick(clickTarget(add)); await sleep(200); }
+  }
   const field = cvv || await find(() => inputLike(/card ?number|cardnum|cc-number|enter card/i) || inputLike(/cvv|cvc|security code/i), 6000);
   if (!field) return false;
   highlight(field.closest("form, li, section, div") || field);
   field.focus();
   const isCvv = /cvv|cvc|security/i.test([field.placeholder, field.name, field.id, field.getAttribute("aria-label"), field.autocomplete].join(" "));
-  const sent = await chrome.runtime.sendMessage({ type: "qr", card: true, cardReady: isCvv ? "cvv" : "form", ...paytmDetails() }).catch(() => false);
-  await step("card", isCvv ? `Paytm: card ending ${last4} selected – type the CVV, press Pay, then enter the OTP.` + (sent ? " (Telegram notified)" : "")
-                           : "Paytm: card form open – enter your debit card details, press Pay, then the OTP." + (sent ? " (Telegram notified)" : ""), true);
+
+  let note, ready;
+  if (!isCvv && card.cardNumber) {              // fill the saved details (never presses Pay)
+    const r = await fillCardForm({ number: card.cardNumber, expiry: card.cardExpiry, name: card.cardName, cvv: card.cardCvv });
+    const shown = card.cardNumber.slice(-4);
+    ready = r.cvvLeft ? "cvv" : "pay";
+    note = r.filled.length
+      ? `Paytm: card ••${shown} filled (${r.filled.join(", ")}) – ` + (r.cvvLeft ? "type the CVV, press Pay, then the OTP." : "press Pay, then enter the OTP.")
+      : "Paytm: card form open but nothing could be filled – enter the details yourself.";
+  } else {
+    ready = isCvv ? "cvv" : "form";
+    note = isCvv ? `Paytm: card ending ${last4} selected – type the CVV, press Pay, then enter the OTP.`
+                 : "Paytm: card form open – enter your debit card details, press Pay, then the OTP.";
+  }
+  const sent = await chrome.runtime.sendMessage({ type: "qr", card: true, cardReady: ready, ...paytmDetails() }).catch(() => false);
+  await step("card", note + (sent ? " (Telegram notified)" : ""), true);
   watchPayment(false);
   return true;
 }

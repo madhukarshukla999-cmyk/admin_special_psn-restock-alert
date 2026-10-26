@@ -91,6 +91,33 @@
 <section class="card">
   <h2>⚡ When a card is back</h2>
   <label class="switch"><input type="checkbox" id="autoClick"><span></span><i class="lbl">Click through to checkout</i></label>
+  <div class="grid2">
+    <label class="field">GamesTheShop: pay with
+      <select id="gtsPayWith"><option value="upi">📷 UPI QR</option><option value="card">💳 Debit card</option></select></label>
+    <label class="field">Debit card – last 4 digits <span class="hint inline">to pick your saved card</span>
+      <input type="text" id="cardLast4" maxlength="4" inputmode="numeric" placeholder="e.g. 7127"></label>
+  </div>
+  <details class="manual" id="cardBox">
+    <summary>💳 Card details for instant checkout <span id="cardSaved" class="muted small"></span></summary>
+    <p class="muted small">Paytm usually has no saved cards, so enter the card once here and the extension fills the form for you.
+      <b>It never presses Pay</b> – you press Pay and enter the bank OTP.</p>
+    <div class="grid2">
+      <label class="field">Card number
+        <input type="text" id="cardNumber" inputmode="numeric" autocomplete="off" placeholder="16 digits"></label>
+      <label class="field">Expiry (MM/YY)
+        <input type="text" id="cardExpiry" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="12/27"></label>
+    </div>
+    <div class="grid2">
+      <label class="field">Name on card
+        <input type="text" id="cardName" autocomplete="off" placeholder="as printed on the card"></label>
+      <label class="field">CVV <span class="hint inline">optional</span>
+        <input type="password" id="cardCvv" inputmode="numeric" autocomplete="off" maxlength="4" placeholder="leave empty = type it each time"></label>
+    </div>
+    <label class="switch"><input type="checkbox" id="cardAutoPay"><span></span><i class="lbl">Press <b>Pay Securely</b> automatically <span class="hint inline">only when the CVV is saved too</span></i></label>
+    <p class="muted small">That takes you to your bank's OTP page. <b>Nothing is charged until you enter the OTP.</b></p>
+    <div class="banner warn small">⚠ These details are stored <b>only in this browser profile</b>, unencrypted. Anyone who can use this computer could read them. Leaving <b>CVV empty</b> is safer: nobody can pay with the card without it. They're wiped if you revoke this browser from Telegram.</div>
+    <button class="btn ghost small" id="cardClear" type="button">Clear card details</button>
+  </details>
   <label class="switch"><input type="checkbox" id="clickPayNow"><span></span><i class="lbl">GamesTheShop: click <b>Pay Now</b> (Paytm QR)</i></label>
   <label class="switch"><input type="checkbox" id="amazonUpiQr"><span></span><i class="lbl">Amazon: pay with <b>UPI QR</b></i></label>
   <div class="chips">

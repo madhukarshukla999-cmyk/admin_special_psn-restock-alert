@@ -20,7 +20,7 @@ import time
 
 from . import history as hist
 from . import report
-from .users import CARD_VALUES, hm, parse_hm, rule_text
+from .users import CARD_VALUES, PUBLIC_CMDS, hm, parse_hm, rule_text
 from .channels import CALLMEBOT_HELP, CALLMEBOT_NUMBER, EMAIL_RE, clean_phone, send_whatsapp
 
 log = logging.getLogger(__name__)
@@ -51,6 +51,13 @@ OWNER_COMMANDS = [
     {"command": "update", "description": "Install the latest version"},
 ]
 OWNER_ONLY = {"/panel", "/dashboard", "/owner", "/groups", "/group", "/channels", "/users", "/update", "/extension"}
+ALIASES = {"start": "menu", "settings": "menu", "notifications": "menu", "intervals": "cycles",
+           "weekly": "week", "report": "week", "night": "quiet", "cards": "values", "best": "besttime"}
+
+
+def canon(cmd: str) -> str:
+    n = cmd.lstrip("/").split("@")[0].lower()
+    return ALIASES.get(n, n)
 DELAY_PRESETS = [0, 30, 60, 120, 300, 600]
 
 
@@ -101,14 +108,20 @@ class Controls:
         self.tg = bot.tg
         self.users = bot.users
         self._last_manual_check = 0.0
+        self._group_cmd_at: dict[str, float] = {}
 
     def _save(self) -> None:
         self.bot.state.save()
 
     def _stores(self, cid):
-        """Stores this person can see (private ones only for the owner)."""
+        """Stores this person (or connected group) can see; private ones are owner-only."""
         hide = self.users.hidden(cid)
-        return [s for s in self.bot.stores if s.id not in hide]
+        out = [s for s in self.bot.stores if s.id not in hide]
+        g = self.bot.groups.all.get(str(cid)) if cid else None
+        if g:                                     # inside a group: only the stores it posts
+            allowed = set(g.get("stores") or [])
+            out = [s for s in out if s.id in allowed]
+        return out
 
     def _priv_tag(self, cid, sid) -> str:
         return " 🔒" if self.users.is_admin(cid) and sid in self.users.private() else ""
@@ -276,6 +289,9 @@ class Controls:
                  f"⏱ Check speed: " + (f"<b>⚡ burst now</b> ({', '.join(bursting)})" if bursting else "normal"),
                  f"🌙 Your quiet hours: <b>{self._quiet_short(cid)}</b> · 💳 Your cards: <b>{self._values_short(cid, 30)}</b>",
                  f"📢 Groups: <b>{len(b.groups.all)}</b> connected" if b.groups.all else "📢 Groups: none connected",
+                 f"👥 {len(self.users.active()) - 1} other people"
+                 + (f" · 🚫 {len(self.users.blocked())} blocked" if self.users.blocked() else "")
+                 + f" · 🔑 {sum(1 for c in PUBLIC_CMDS if self.users.cmd_allowed(c, 'users'))}/{len(PUBLIC_CMDS)} commands on",
                  f"👑 You get alerts first · others wait <b>{fmt_delay((st.settings.get('delays') or {}).get('users', 0))}</b>, "
                  f"groups <b>{fmt_delay((st.settings.get('delays') or {}).get('groups', 0))}</b>"
                  + (f" · 🔒 private: {', '.join(b.names[s] for s in self.users.private() if s in b.names)}" if self.users.private() else ""),
@@ -288,7 +304,9 @@ class Controls:
              for k, lbl in (("dm", "📷 QR in DM"), ("notify", "🔔 Pay manually"), ("off", "⛔ QR off"))],
             [{"text": "⏱ Check speed", "callback_data": "cy:list"}, {"text": "🏪 Stores & my alerts", "callback_data": "refresh"}],
             [{"text": "🌙 Quiet hours", "callback_data": "qh:pn:home"}, {"text": "💳 Card values", "callback_data": "cv:pn:home"}],
-            [{"text": "⏳ Alert delays", "callback_data": "dl:home"},
+            [{"text": "🔑 Commands", "callback_data": "cm:home"},
+             {"text": "⏳ Alert delays", "callback_data": "dl:home"}],
+            [
              {"text": f"🔒 Private stores ({len(self.users.private())})", "callback_data": "pv:home"}],
             [{"text": f"📢 Groups ({len(b.groups.all)})", "callback_data": "gr:list"},
              {"text": "📊 Weekly report", "callback_data": "wk:pn"}],
@@ -438,14 +456,35 @@ class Controls:
                 lines.append(f"👑 {name} (<code>{cid}</code>) · owner")
             elif rec.get("approved"):
                 lines.append(f"✅ {name} (<code>{cid}</code>)")
-                rows.append([{"text": f"❌ Remove {rec.get('name') or cid}"[:40], "callback_data": f"u:rm:{cid}"}])
+                rows.append([{"text": f"❌ Remove {rec.get('name') or cid}"[:28], "callback_data": f"u:rm:{cid}"},
+                             {"text": "🚫 Block", "callback_data": f"u:bl:{cid}"}])
             elif rec.get("pending"):
-                lines.append(f"⏳ {name} (<code>{cid}</code>) · waiting")
-                rows.append([{"text": f"✅ Allow {rec.get('name') or cid}"[:40], "callback_data": f"u:ok:{cid}"},
-                             {"text": "❌ Deny", "callback_data": f"u:no:{cid}"}])
+                tries = rec.get("tries", 1)
+                lines.append(f"⏳ {name} (<code>{cid}</code>) · waiting"
+                             + (f" · asked {tries}×" if tries > 1 else ""))
+                rows.append([{"text": f"✅ Allow {rec.get('name') or cid}"[:24], "callback_data": f"u:ok:{cid}"},
+                             {"text": "❌ Deny", "callback_data": f"u:no:{cid}"},
+                             {"text": "🚫 Block", "callback_data": f"u:bl:{cid}"}])
+        den = [(c, r) for c, r in self.users.denied().items() if not r.get("blocked")]
+        if den:
+            lines.append("")
+            for cid2, rec in den[:10]:
+                lines.append(f"❌ {html.escape(rec.get('name') or cid2)} (<code>{cid2}</code>) · refused"
+                             + (f" · asked {rec['tries']}×" if rec.get("tries", 1) > 1 else ""))
+                rows.append([{"text": f"✅ Allow {rec.get('name') or cid2}"[:24], "callback_data": f"u:ok:{cid2}"},
+                             {"text": "🚫 Block", "callback_data": f"u:bl:{cid2}"}])
+        blk = self.users.blocked()
+        if blk:
+            lines.append("")
+            for cid2, rec in list(blk.items())[:10]:
+                lines.append(f"🚫 {html.escape(rec.get('name') or cid2)} (<code>{cid2}</code>) · blocked")
+                rows.append([{"text": f"♻ Unblock {rec.get('name') or cid2}"[:34], "callback_data": f"u:ub:{cid2}"}])
         lines += ["", "To add someone: they open this bot in Telegram and tap <b>Start</b>. "
-                      "You'll get Allow / Deny buttons."]
-        return "\n".join(lines), {"inline_keyboard": rows or [[{"text": "🔄 Refresh", "callback_data": "u:list"}]]}
+                      "You'll get Allow / Deny / Block buttons.",
+                  "<i>❌ Deny refuses them but keeps them quiet. 🚫 Block also stops the bot answering "
+                  "them at all – use it for repeat requests.</i>"]
+        rows.append([{"text": "🔑 Commands", "callback_data": "cm:home"}, {"text": "🔄 Refresh", "callback_data": "u:list"}])
+        return "\n".join(lines), {"inline_keyboard": rows}
 
     HELP = ("🤖 I check PlayStation gift card stock and message you when a card comes back "
             "(and when it sells out).\n\n"
@@ -481,7 +520,9 @@ class Controls:
         if chat.get("type") in ("group", "supergroup", "channel"):
             if msg.get("migrate_to_chat_id"):            # group upgraded to a supergroup
                 await self.bot.groups.migrate(str(cid), str(msg["migrate_to_chat_id"]))
-            return                                       # groups only receive posts; commands are for DMs
+                return
+            await self._group_command(client, msg, chat)
+            return
         text = (msg.get("text") or "").strip()
         if not cid or not text.startswith("/"):
             return
@@ -490,7 +531,13 @@ class Controls:
         cmd = cmd.split("@")[0].lower()
         send = lambda t, **kw: self.tg.send(client, t, chat_ids=[cid], **kw)  # noqa: E731
 
+        if self.users.is_blocked(cid):                    # blocked: the bot simply doesn't answer
+            return
+        name_c = canon(cmd)
         if not self.users.is_allowed(cid):
+            if (self.users.get(cid) or {}).get("denied"):   # already refused: don't keep promising
+                await send("🔒 You don't have access to this bot.")
+                return
             if cmd != "/start":
                 await send("🔒 You don't have access yet. Send /start to request it.")
                 return
@@ -504,11 +551,15 @@ class Controls:
                                    chat_ids=self.users.recipients(admins_only=True),
                                    reply_markup={"inline_keyboard": [[
                                        {"text": "✅ Allow", "callback_data": f"u:ok:{cid}"},
-                                       {"text": "❌ Deny", "callback_data": f"u:no:{cid}"}]]})
+                                       {"text": "❌ Deny", "callback_data": f"u:no:{cid}"},
+                                       {"text": "🚫 Block", "callback_data": f"u:bl:{cid}"}]]})
             await send("👋 Request sent. You'll get a message once you're approved.")
             return
 
         admin = self.users.is_admin(cid)
+        if not admin and name_c in PUBLIC_CMDS and not self.users.cmd_allowed(name_c, "users"):
+            await send("🔒 That command is switched off.")
+            return
         if cmd in ("/menu", "/start", "/settings", "/notifications"):
             await send(self.menu_text(cid), reply_markup=self.menu_markup(cid))
         elif cmd in ("/groups", "/group", "/channels") and admin:
@@ -599,6 +650,12 @@ class Controls:
                 await self.tg.answer_callback(client, cq["id"], "Not available")
                 return
             await self.bot.groups.on_button(client, cq, cid, mid, data)
+            return
+        if data.startswith("cm:"):
+            if not self.users.is_admin(cid):
+                await self.tg.answer_callback(client, cq["id"], "Not available")
+                return
+            await self._on_commands_button(client, cq, cid, mid, data)
             return
         if data.startswith("dl:") or data.startswith("pv:"):
             if not self.users.is_admin(cid):
@@ -749,6 +806,49 @@ class Controls:
             self._save()
         await self.tg.answer_callback(client, cq["id"], note)
         await self.tg.edit(client, cid, mid, text, kb)
+
+    def commands_view(self) -> tuple[str, dict]:
+        lines = ["🔑 <b>Commands</b> 🔐 <i>only you see this</i>", "",
+                 "What <b>other people</b> (👤) and <b>connected groups</b> (👥) may use. "
+                 "You always have every command.", ""]
+        rows = []
+        for cmd, (label, in_groups) in PUBLIC_CMDS.items():
+            u = self.users.cmd_allowed(cmd, "users")
+            g = self.users.cmd_allowed(cmd, "groups")
+            lines.append(f"{'✅' if u else '🚫'} {label}" + (f" · 👥 {'on' if g else 'off'}" if in_groups else ""))
+            row = [{"text": f"{'✅' if u else '🚫'} 👤 /{cmd}", "callback_data": f"cm:u:{cmd}"}]
+            if in_groups:
+                row.append({"text": f"{'✅' if g else '🚫'} 👥 group", "callback_data": f"cm:g:{cmd}"})
+            rows.append(row)
+        lines += ["", "<i>Turned-off commands disappear from their command menu and reply "
+                  "\"switched off\" if typed. Only 👥-marked ones can work in groups at all.</i>"]
+        rows.append([{"text": "⬅ Back to panel", "callback_data": "pn:home"}])
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    async def _on_commands_button(self, client, cq, cid, mid, data) -> None:
+        p = data.split(":")
+        note = ""
+        if len(p) == 3 and p[1] in ("u", "g") and p[2] in PUBLIC_CMDS:
+            where = "users" if p[1] == "u" else "groups"
+            on = not self.users.cmd_allowed(p[2], where)
+            self.users.set_cmd(p[2], where, on)
+            self._save()
+            note = f"/{p[2]} for {'people' if where == 'users' else 'groups'}: {'on ✅' if on else 'off 🚫'}"
+            await self._publish_commands(client)
+        await self.tg.answer_callback(client, cq["id"], note)
+        text, kb = self.commands_view()
+        await self.tg.edit(client, cid, mid, text, kb)
+
+    async def _publish_commands(self, client) -> None:
+        """Telegram's command menus: public list, group list, and the owner's full list."""
+        pub = [c for c in COMMANDS if self.users.cmd_allowed(canon(c["command"]), "users")]
+        grp = [c for c in COMMANDS if self.users.cmd_allowed(canon(c["command"]), "groups")]
+        await self.tg.api(client, "setMyCommands", {"commands": pub})
+        await self.tg.api(client, "setMyCommands", {"commands": grp, "scope": {"type": "all_group_chats"}})
+        for a in self.users.admins:
+            await self.tg.api(client, "setMyCommands", {
+                "commands": OWNER_COMMANDS[:1] + COMMANDS + OWNER_COMMANDS[1:],
+                "scope": {"type": "chat", "chat_id": int(a) if a.lstrip("-").isdigit() else a}})
 
     async def _on_panel_button(self, client, cq, cid, mid, data) -> None:
         from . import extension_push as ep
@@ -1123,6 +1223,35 @@ class Controls:
                 "See or revoke connected browsers: 💻 below, or <code>/extension browsers</code>.\n"
                 "<i>⚠ The setup code contains your bot token – don't forward it. Delete this message after setup.</i>")
 
+    async def _group_command(self, client, msg, chat) -> None:
+        """Read-only commands inside a connected group, if the owner allowed them."""
+        cid = str(chat.get("id"))
+        text = (msg.get("text") or "").strip()
+        if not text.startswith("/"):
+            return
+        if cid not in self.bot.groups.all:               # not a group the owner connected
+            return
+        cmd = canon(text.split()[0])
+        if not self.users.cmd_allowed(cmd, "groups"):
+            return
+        now = time.time()                                 # one command per 8 s per group
+        if now - self._group_cmd_at.get(cid, 0) < 8:
+            return
+        self._group_cmd_at[cid] = now
+        args = text.split()[1:]
+        send = lambda t: self.tg.send(client, t, chat_ids=[cid])  # noqa: E731
+        if cmd == "status":
+            await send(self.status_text(cid))
+        elif cmd == "history":
+            days = int(args[0]) if args and args[0].isdigit() else 7
+            await send(self.history_text(max(1, min(days, 90)), cid))
+        elif cmd == "besttime":
+            await send(self.besttime_text(cid))
+        elif cmd == "help":
+            await send("🤖 I post PlayStation gift card restocks here.\n\n"
+                       + "\n".join(f"/{c}" for c in PUBLIC_CMDS if self.users.cmd_allowed(c, "groups"))
+                       + "\n\n<i>Message me privately and tap Start to get your own alerts.</i>")
+
     async def _on_user_button(self, client, cq, cid, data) -> None:
         if not self.users.is_admin(cid):
             await self.tg.answer_callback(client, cq["id"], "Not available")
@@ -1140,9 +1269,15 @@ class Controls:
                                chat_ids=[target])
         elif action in ("no", "rm") and rec:
             self.users.remove(target)
-            note = f"{name} removed"
+            note = f"{name} refused" if action == "no" else f"{name} removed"
             if action == "rm":
                 await self.tg.send(client, "You've been removed from PlayStation card alerts.", chat_ids=[target])
+        elif action == "bl" and (rec or target):
+            self.users.block(target, name)
+            note = f"{name} blocked 🚫"
+        elif action == "ub" and rec:
+            self.users.unblock(target)
+            note = f"{name} unblocked ♻ (still needs approving)"
         elif action != "list":
             note = "Already handled"
         self._save()
@@ -1154,10 +1289,7 @@ class Controls:
 
     # -- polling loop ----------------------------------------------------
     async def run(self, client, stop: asyncio.Event) -> None:
-        await self.tg.api(client, "setMyCommands", {"commands": COMMANDS})        # everyone
-        for a in self.users.admins:                                               # owner's chat only
-            await self.tg.api(client, "setMyCommands", {"commands": OWNER_COMMANDS[:1] + COMMANDS + OWNER_COMMANDS[1:],
-                                                        "scope": {"type": "chat", "chat_id": int(a) if a.lstrip("-").isdigit() else a}})
+        await self._publish_commands(client)
         offset = self.bot.state.settings.get("tg_offset")
         while not stop.is_set():
             try:

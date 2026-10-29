@@ -12,6 +12,23 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 PREFS = {"soldout": True, "summary": True, "weekly": True}   # defaults
+
+# Commands other people may use: name -> (label, allowed in groups at all)
+PUBLIC_CMDS = {
+    "menu": ("🛎 /menu – their alert settings", False),
+    "status": ("📦 /status – what's in stock", True),
+    "check": ("🔎 /check – check every store now", False),
+    "history": ("📜 /history – past restocks", True),
+    "besttime": ("⏰ /besttime – usual restock times", True),
+    "health": ("🩺 /health – are stores being checked", False),
+    "cycles": ("⏱ /cycles – how often stores are checked", False),
+    "week": ("📊 /week – weekly report", False),
+    "quiet": ("🌙 /quiet – quiet hours", False),
+    "values": ("💳 /values – which card values", False),
+    "whatsapp": ("💬 /whatsapp – alerts on WhatsApp", False),
+    "email": ("📧 /email – alerts by email", False),
+    "help": ("❓ /help", True),
+}
 CARD_VALUES = [500, 1000, 1500, 2000, 2500, 3000, 4000, 5000]
 
 
@@ -216,20 +233,71 @@ class Users:
         return [(cid, self.channel(cid, name)) for cid in self.recipients(store_id=store_id, pref=pref)
                 if self.channel_on(cid, name)]
 
-    # -- requests --------------------------------------------------------
-    def request(self, cid, name: str) -> bool:
-        """Register a join request. Returns True if it's new (admins should be told)."""
-        cid = str(cid)
-        if cid in self.all:
+    # -- which commands other people / groups may use (owner decides) ----
+    def cmd_allowed(self, cmd: str, where: str) -> bool:
+        """where = 'users' or 'groups'. Unlisted commands are never allowed in groups."""
+        if cmd not in PUBLIC_CMDS:
             return False
-        self.all[cid] = {"name": name, "pending": True}
+        label, in_groups = PUBLIC_CMDS[cmd]
+        if where == "groups" and not in_groups:
+            return False
+        saved = (self.state.settings.get("cmd_perms") or {}).get(cmd, {})
+        return bool(saved.get(where, True if where == "users" else in_groups))
+
+    def set_cmd(self, cmd: str, where: str, on: bool) -> None:
+        self.state.settings.setdefault("cmd_perms", {}).setdefault(cmd, {})[where] = bool(on)
+
+    # -- requests / blocking ---------------------------------------------
+    def request(self, cid, name: str) -> bool:
+        """Register a join request. Returns True if the owner should be told."""
+        cid = str(cid)
+        rec = self.all.get(cid)
+        if rec:                                  # already known: never ping the owner again
+            rec["tries"] = rec.get("tries", 1) + 1
+            rec["last_try"] = time.time()
+            return False
+        self.all[cid] = {"name": name, "pending": True, "tries": 1, "last_try": time.time()}
         return True
 
     def approve(self, cid) -> None:
         rec = self.all[str(cid)]
         rec.pop("pending", None)
+        rec.pop("denied", None)
         rec["approved"] = True
 
+    def deny(self, cid) -> None:
+        """Refuse, but keep the record so repeat /start can't ping the owner again."""
+        rec = self.all.get(str(cid))
+        if rec and str(cid) not in self.admins:
+            rec.pop("pending", None)
+            rec.pop("approved", None)
+            rec["denied"] = True
+
+    def block(self, cid, name: str | None = None) -> None:
+        cid = str(cid)
+        if cid in self.admins:
+            return
+        rec = self.all.setdefault(cid, {"name": name or cid})
+        for k in ("pending", "approved", "denied"):
+            rec.pop(k, None)
+        rec["blocked"] = True
+
+    def unblock(self, cid) -> None:
+        rec = self.all.get(str(cid))
+        if rec:
+            rec.pop("blocked", None)
+            rec["denied"] = True                 # not approved, but can't ping the owner either
+
+    def is_blocked(self, cid) -> bool:
+        return bool((self.get(cid) or {}).get("blocked"))
+
+    def blocked(self) -> dict[str, dict]:
+        return {c: r for c, r in self.all.items() if r.get("blocked")}
+
+    def denied(self) -> dict[str, dict]:
+        return {c: r for c, r in self.all.items() if r.get("denied")}
+
     def remove(self, cid) -> None:
+        """Remove access but keep a 'denied' record, so /start can't re-ping the owner."""
         if str(cid) not in self.admins:
-            self.all.pop(str(cid), None)
+            self.deny(cid)

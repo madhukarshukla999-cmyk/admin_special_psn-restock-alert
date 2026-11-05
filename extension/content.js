@@ -401,24 +401,26 @@ const AMZ_DISABLED = '[aria-disabled="true"], .a-button-disabled, [disabled], .a
 
 // The recipient email box of a gift card order form (not the site search or sign-in boxes)
 function amzGiftEmailBox() {
-  return [...document.querySelectorAll('input[type="email"], textarea, input[type="text"], input:not([type])')].find((i) => {
-    if (!visible(i) || i.closest("#nav-belt, #navbar, header, form[role=search]")) return false;
-    const t = fieldText(i, true);
-    return /recipient|e-?mail/i.test(t) && !/search|password|sign.?in|phone|mobile/i.test(t);
-  }) || null;
+  const boxes = [...document.querySelectorAll('input[type="email"], textarea, input[type="text"], input:not([type])')]
+    .filter((i) => visible(i) && !i.closest("#nav-belt, #navbar, header, form[role=search]"));
+  const ok = (t) => /recipient|e-?mail/i.test(t) && !/search|password|sign.?in|phone|mobile|message/i.test(t);
+  // the box's own placeholder / name / label first: nearby text can include hidden fields
+  // (e.g. a "mobile number" option) that would wrongly rule it out
+  return boxes.find((i) => ok(fieldText(i, false))) || boxes.find((i) => ok(fieldText(i, true))) || null;
 }
 
 // Amount options ("₹1,000", "₹2,000", …): clickable boxes in the gift card form, not prices
 // Variation switchers ("Rs.1000 / Rs.2000 …" swatches) open a different listing: never treat those as amounts
 const AMZ_TWISTER = '[id*="twister"], [id^="variation_"], [class*="twister"], [data-csa-c-slot-id*="twister"]';
 
-function amzGiftAmounts(near) {
+function amzGiftAmounts(near, underHeading = false) {
   const re = /^(?:₹|rs\.?|inr)?\s*([\d,]{3,7})(?:\.00)?$/i;
   const label = (e) => ((e.innerText || e.value || "") + "").trim().split("\n")[0].trim();   // "₹1,000" (+ e.g. "5% off" below)
   const hits = [...document.querySelectorAll("button, [role=button], [role=radio], label, li, span, a, input[type=submit], input[type=button]")]
     .filter((e) => visible(e) && re.test(label(e)) &&
       e.closest("button, [role=button], [role=radio], label, li, .a-button, input") &&
-      !e.closest(AMZ_DISABLED) && !e.closest(AMZ_TWISTER));
+      // (under a "Gift amount" heading they're the amounts even if Amazon built them as a switcher)
+      !e.closest(AMZ_DISABLED) && (underHeading || !e.closest(AMZ_TWISTER)));
   const inner = hits.filter((e) => !hits.some((o) => o !== e && e.contains(o)));
   const opts = inner.map((e) => ({ el: e, value: Number(label(e).match(re)[1].replace(/,/g, "")) }))
     .filter((a) => a.value >= 100 && a.value <= 100000);
@@ -435,9 +437,13 @@ function amzGiftAmounts(near) {
 // amount is picked) 2+ amount buttons around the Add to Cart / Buy Now button.
 function amzGiftForm(buyBtn) {
   const email = amzGiftEmailBox();
-  if (email) return { email, amounts: amzGiftAmounts(email) };
-  const amounts = amzGiftAmounts(buyBtn);
-  return amounts.length ? { email: null, amounts } : null;
+  // "Gift amount (₹250.00 - ₹10,000.00):" with the amount buttons under it (the form is often in
+  // the middle column, away from the Add to Cart / Buy Now box on the right)
+  const heading = textEl(/^gift (card )?(amount|value|denomination)/i, "span, label, legend, h1, h2, h3, h4, h5, p, div");
+  let amounts = heading ? amzGiftAmounts(heading, true) : [];
+  if (!amounts.length && email) amounts = amzGiftAmounts(email);
+  if (!amounts.length && !email) amounts = amzGiftAmounts(buyBtn);
+  return email || amounts.length ? { email, amounts } : null;
 }
 
 async function amzFillGiftCard(gc) {
@@ -485,6 +491,8 @@ async function amazon(job) {
       return step("none", `Amazon: ${btn ? "this card is currently unavailable (sold out)" : "no Buy Now / Add to Cart button " + amzDiag()} – check the tab.`, true);
     // E-gift cards (amount + recipient email) must be filled in before the buttons work
     const gc = amzGiftForm(btn);
+    if (!gc && /recipient e-?mail|gift amount/i.test(document.body.innerText))       // looks like one, but not recognised
+      await step(job.step, "Amazon: page looks like a gift card form but it wasn't recognised – trying Add to Cart anyway. " + amzDiag());
     if (gc) {
       if (!(await amzFillGiftCard(gc))) return;            // says why in the log
       btn = await find(() => AMZ_BUY_NOW() || AMZ_ADD(), 5000);

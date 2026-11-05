@@ -134,22 +134,31 @@ function clickable(el) {
   return box || el;
 }
 function textEl(re, sel = "span, a, button, input[type=submit], label, h1, h2, h3, h4, h5, div") {
-  return [...document.querySelectorAll(sel)].filter((e) => visible(e) &&
-    re.test(((e.innerText || e.value || e.getAttribute("aria-label") || "") + "").trim()))
-    .sort((a, b) => (a.innerText || "").length - (b.innerText || "").length)[0] || null;  // innermost
+  const hits = [...document.querySelectorAll(sel)].filter((e) => visible(e) &&
+    re.test(((e.innerText || e.value || e.getAttribute("aria-label") || "") + "").trim()));
+  // innermost: wrappers often have exactly the same text as the element inside them
+  return hits.filter((e) => !hits.some((o) => o !== e && e.contains(o)))
+    .sort((a, b) => (a.innerText || "").length - (b.innerText || "").length)[0] || null;
 }
 
-// The UPI QR option on Amazon's payment page ("Scan and Pay with UPI")
+// The UPI QR option on Amazon's payment page ("Scan and Pay with UPI").
+// Amazon nests the payment rows deeply, so start from each radio button and grow it to its row
+// (the largest box holding only that radio): the radio whose row says "Scan and Pay with" is it.
+const RADIO_SELS = ['input[type="radio"]', '[role="radio"]'];
+const isRadio = (e) => !!(e && e.matches && RADIO_SELS.some((s) => e.matches(s)));
+const radioChecked = (e) => (e.type === "radio" ? e.checked : e.getAttribute("aria-checked") === "true");
 function amzUpiQrOption() {
-  const t = textEl(/^scan and pay with/i);
-  if (!t) return null;
-  // nearest ancestor holding exactly one radio button = this option's row
-  for (let el = t, i = 0; el && i < 8; el = el.parentElement, i++) {
-    const radios = el.querySelectorAll('input[type="radio"]');
-    if (radios.length === 1) return radios[0];
-    if (radios.length > 1) break;
+  for (const sel of RADIO_SELS) {
+    for (const r of document.querySelectorAll(sel)) {
+      let row = r;
+      for (let i = 0; i < 15 && row.parentElement && row.parentElement !== document.body; i++) {
+        if (row.parentElement.querySelectorAll(sel).length > 1) break;
+        row = row.parentElement;
+      }
+      if (/scan and pay with/i.test(row.innerText || "")) return r;
+    }
   }
-  return t;
+  return textEl(/^scan and pay with/i);      // no radio found: the text itself (clicked as a fallback)
 }
 // small box around an element (first ancestor with a bit of text), to tell what it belongs to
 function boxText(el) {
@@ -157,8 +166,9 @@ function boxText(el) {
     if ((p.innerText || "").trim().length > 25) return p.innerText;
   return "";
 }
-const enabled = (e) => visible(e) && e.getAttribute("aria-disabled") !== "true" &&
-  !(e.closest && e.closest(".a-button-disabled"));
+// greyed-out buttons: disabled on the button itself or on any box around it
+const enabled = (e) => visible(e) &&
+  !(e.closest && e.closest('[aria-disabled="true"], .a-button-disabled, [disabled]'));
 const amzUseThisPayment = () => {
   const t = [...document.querySelectorAll("span, button, input[type=submit], a")].filter((e) => visible(e) &&
     /^use this payment method$/i.test(((e.innerText || e.value || e.getAttribute("aria-label") || "") + "").trim()));
@@ -171,7 +181,11 @@ function amzDiag() {
     .map((f) => { try { return new URL(f.src).hostname + new URL(f.src).pathname.slice(0, 20); } catch { return f.name || "?"; } });
   const btns = [...document.querySelectorAll("button, input[type=submit], .a-button-text")].filter(visible)
     .map((b) => (b.innerText || b.value || b.getAttribute("aria-label") || "").trim()).filter(Boolean).slice(0, 8);
-  return `[debug ${location.pathname.slice(0, 40)} | scanText:${/scan and pay/i.test(document.body.innerText)} ` +
+  const upi = amzUpiQrOption(), use = [...document.querySelectorAll("span, button, input[type=submit], a")]
+    .find((e) => visible(e) && /^use this payment method$/i.test(((e.innerText || e.value || "") + "").trim()));
+  return `[debug ${location.pathname.slice(0, 40)} | ${window === window.top ? "page" : "frame"} | ` +
+         `upi:${!upi ? "none" : isRadio(upi) ? (radioChecked(upi) ? "radio,checked" : "radio,unchecked") : "text-only"} ` +
+         `useBtn:${!use ? "none" : enabled(clickable(use)) ? "on" : "grey"} | scanText:${/scan and pay/i.test(document.body.innerText)} ` +
          `radios:${document.querySelectorAll('input[type=radio]').length} frames:${JSON.stringify(frames)} btns:${JSON.stringify(btns)}]`;
 }
 // On the order review page: is the chosen payment the UPI QR, and is the button "Pay with UPI"?
@@ -222,23 +236,32 @@ function realClick(el) {
 // Selects "Scan and Pay with UPI" in this document and returns the enabled
 // "Use this payment method" button (or null). Used by the top page and by iframes.
 async function amzChooseUpi() {
+  // If "Use this payment method" already looks usable before anything is picked, it can't tell
+  // us whether UPI got selected; then only the UPI radio itself counts.
+  const usableBefore = !!amzUseThisPayment();
   const ready = () => {
-    const r = amzUpiQrOption();
-    return (!r || r.type !== "radio" || r.checked) && amzUseThisPayment();
+    const r = amzUpiQrOption(), use = amzUseThisPayment();
+    if (!use) return null;
+    if (isRadio(r)) return radioChecked(r) ? use : null;
+    return usableBefore ? null : use;
   };
+  // Amazon's script can undo a selection a moment later, so it has to still hold after 300 ms
+  const settled = async () => { if (!ready()) return null; await sleep(300); return ready(); };
   for (let attempt = 0; attempt < 3; attempt++) {
     const r = amzUpiQrOption(), t = textEl(/^scan and pay with/i);
     if (!r && !t) return null;
     // radio first; then the row / label / text, in case Amazon listens on those
     const targets = attempt === 0 ? [r]
-      : [t && t.closest("label, [role=radio], [data-pmts-component-id], .a-radio, li") , t, r];
+      : [t && t.closest("label, [role=radio], [data-pmts-component-id], .a-radio, li"), t, r];
     for (const el of targets) {
-      if (!el || (r && r.type === "radio" && r.checked)) break;
+      if (!el || (isRadio(r) && radioChecked(r))) break;
       realClick(el);
       await sleep(150);
     }
-    const use = await find(ready, attempt === 0 ? 2500 : 3500);
-    if (use) return use;
+    if (await find(ready, attempt === 0 ? 2500 : 3500)) {
+      const use = await settled();
+      if (use) return use;
+    }
   }
   return null;
 }
@@ -262,10 +285,13 @@ async function amazonFrame(job) {
   if (!found) return;
   const use = await amzChooseUpi();
   const r = amzUpiQrOption();
-  if (!use && r && r.type === "radio" && !r.checked) return;     // couldn't select it
+  if (!use && !(isRadio(r) && radioChecked(r))) return;          // couldn't select it
   window.top.postMessage({ psnbot: 1, chosen: true }, "*");
   if (use) { realClick(use); window.top.postMessage({ psnbot: 1, pressed: true }, "*"); }
 }
+
+const AMZ_STUCK = "Amazon: pressed 'Use this payment method' but the page didn't move on – " +
+  "pick 'Scan and Pay with UPI' and press it yourself. ";
 
 async function amazonCheckout(job) {
   const o = await chrome.storage.local.get({ amazonUpiQr: true });
@@ -301,9 +327,12 @@ async function amazonCheckout(job) {
     await sleep(400);
     if (!frameState.pressed && !moved()) { const use = amzUseThisPayment(); if (use) realClick(use); }
     if (await find(() => amzPayWithUpi() && amzQrChosen(), 15000)) return amazonCheckout({ ...job, step: "chosen" });
-    return;
+    return step("checkout", AMZ_STUCK + amzDiag(), true);
   }
   if (what === "choose") {
+    // one copy of this script per page does the choosing (two clicking at once undo each other)
+    const mine = await chrome.runtime.sendMessage({ type: "claim", what: "amzpay" + location.pathname }).catch(() => true);
+    if (!mine) return;
     await step("choosing", "Amazon: payment page – choosing 'Scan and Pay with UPI'…");
     const use = await amzChooseUpi();
     if (!use) return step("checkout", "Amazon: couldn't select 'Scan and Pay with UPI' – tap it, then 'Use this payment method'. " + amzDiag(), true);
@@ -311,7 +340,7 @@ async function amazonCheckout(job) {
     realClick(use);
     // review page: usually a new URL (handled by the main loop); if it updates in place, go on here
     if (await find(() => amzPayWithUpi() && amzQrChosen(), 15000)) return amazonCheckout({ ...job, step: "chosen" });
-    return;
+    return step("checkout", AMZ_STUCK + amzDiag(), true);   // (says nothing if the page moved on)
   }
   if (what === "change") {
     await step("changepay", "Amazon: review page has another payment method – clicking 'Change'…");

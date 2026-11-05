@@ -102,6 +102,18 @@ async function handleAlert(data) {
   if (seen.has(key)) return;
   seen.add(key);
 
+  // This browser's own Amazon check and the bot's alert usually both report the same restock:
+  // whichever comes second must not open the card again (within 10 min). Bot alerts only skip
+  // cards the local check opened, so a real second restock from the bot still opens.
+  if (!data.test) {
+    const before = (data.items || []).length;
+    data = { ...data, items: await claimNew(data) };
+    if (!data.items.length) {
+      if (before && !data.local) await log(`${data.store_name}: already opened by this browser's own Amazon check`);
+      return;
+    }
+  }
+
   const auto = AUTO_STORES.includes(data.store);
   const storeOn = auto ? s.stores[data.store] : s.stores.others;
   if (!storeOn && !data.test) { await log(`Skipped ${data.store_name} (turned off)`); return; }
@@ -199,7 +211,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     })();
     return true;
   }
-  if (msg.type === "settings-changed") { ensureListener(); return; }
+  if (msg.type === "settings-changed") { ensureListener(); amzWatchKick(); return; }
   if (msg.type === "test") {
     const urls = (msg.urls || [msg.url]).filter(Boolean);
     handleAlert({ test: true, ts: Date.now() / 1000, store: msg.store, store_name: "Test",
@@ -363,7 +375,7 @@ async function tickQrs() {
 
 chrome.alarms.onAlarm.addListener((a) => {
   if (/^qr_\d+$/.test(a.name)) expireQr(Number(a.name.slice(3)));
-  else if (a.name === "keepalive") { tickQrs(); heartbeat(false).catch(() => {}); }
+  else if (a.name === "keepalive") { tickQrs(); heartbeat(false).catch(() => {}); amzWatchKick(); }
 });
 
 // The payment tab reported the result (content script watches the page text).
@@ -518,3 +530,142 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
       : `⚠ The extension isn't allowed to run on ${host} – that page can't be filled. Send the developer this address.`);
   }, 15000);
 });
+
+// ---- Amazon: check the cards from this browser too (Options → "Check Amazon from this browser") ----
+// The bot checks Amazon from a server every 30–120 s and its alert then has to reach this browser.
+// This checks the same product pages straight from your own internet connection every few seconds
+// and opens Buy Now the moment a card comes back. It loads the pages WITHOUT your Amazon login
+// (credentials: "omit"), so the checks have nothing to do with your account. Off by default.
+const AMZ_WATCH_DEFAULTS = { amzWatch: false, amzWatchSec: 15,
+  amzWatchList: "B093QF35KZ  ₹2000 card\nB07K6RYVJ5  ₹4000 card\nB0C1H3K2V4  PlayStation E-Gift Card" };
+let amzTimer = null, amzBusy = false, amzPauseUntil = 0;
+
+// ASINs from the Options list: one per line, a bare 10-character ID or any amazon.in product link
+function amzAsins(text) {
+  const out = [];
+  for (const line of String(text || "").split("\n")) {
+    const m = line.match(/\/(?:dp|gp\/product|gp\/aw\/d)\/([A-Z0-9]{10})(?:[/?#\s]|$)/) || line.trim().match(/^([A-Z0-9]{10})(?:\s|$)/);
+    if (m && !out.includes(m[1])) out.push(m[1]);
+  }
+  return out;
+}
+
+const amzValue = (title) => {
+  const m = String(title).match(/(?:rs\.?|₹|inr)\s*-?\s*([\d,]{3,6})(?!\d)|(?<!\d)([\d,]{3,6})\s*-?\s*(?:inr|rs)\b/i);
+  return m ? Number((m[1] || m[2]).replace(/,/g, "")) || null : null;
+};
+const unescapeHtml = (s) => s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&nbsp;/g, " ");
+
+// Same rules as the bot (psnbot/stores/amazon.py). Returns {inStock, title}, "blocked", or null (couldn't tell).
+async function amzCheck(asin) {
+  let r, html;
+  try {
+    r = await fetch(`https://www.amazon.in/gp/aw/d/${asin}`, { credentials: "omit", cache: "no-store" });
+    html = await r.text();
+  } catch { return null; }
+  if (r.status === 503 || /validateCaptcha|Type the characters you see/i.test(html)) return "blocked";
+  if (!r.ok) return null;
+  const title = unescapeHtml(((html.match(/id="productTitle"[^>]*>([\s\S]*?)</) || [])[1] || "").replace(/\s+/g, " ").trim());
+  if (!title) return null;                                     // not a normal product page
+  const avail = ((html.match(/id="availability"[\s\S]{0,1500}?<\/div>/) || [""])[0]).replace(/<[^>]+>/g, " ").toLowerCase();
+  const buy = /id="(?:add-to-cart-button|buy-now-button)"/.test(html);
+  let inStock;
+  if (/currently unavailable|out of stock/.test(avail)) inStock = false;
+  else if (buy) inStock = true;
+  else if (avail.trim() || /id="outOfStock"/.test(html)) inStock = false;
+  else return null;
+  return { inStock, title };
+}
+
+// Cards opened recently: "store:id" -> { ts, by: "local" | "bot" } (session storage, so it
+// survives the worker restarting). Check + mark run one alert at a time, so two alerts for
+// the same card arriving together can't both open it.
+let claimChain = Promise.resolve();
+function claimNew(data) {
+  const run = claimChain.then(async () => {
+    const { opened = {} } = await chrome.storage.session.get("opened");
+    const now = Date.now();
+    for (const k of Object.keys(opened)) if (now - opened[k].ts > 30 * 60 * 1000) delete opened[k];
+    const fresh = (data.items || []).filter((i) => {
+      const o = opened[`${data.store}:${i.id}`];
+      return !(o && now - o.ts < 10 * 60 * 1000 && (data.local || o.by === "local"));
+    });
+    for (const i of fresh) opened[`${data.store}:${i.id}`] = { ts: now, by: data.local ? "local" : "bot" };
+    await chrome.storage.session.set({ opened });
+    return fresh;
+  });
+  claimChain = run.catch(() => {});
+  return run;
+}
+
+async function amzStatus(text) {                    // shown in Options; only written when it changes
+  const { amzWatchInfo } = await chrome.storage.local.get({ amzWatchInfo: "" });
+  if (amzWatchInfo !== text) await chrome.storage.local.set({ amzWatchInfo: text });
+}
+
+function amzWatchKick() {
+  if (!amzTimer && !amzBusy) amzTimer = setTimeout(amzWatchRun, 500);
+}
+
+async function amzWatchRun() {
+  amzTimer = null;
+  const s = await chrome.storage.local.get({ ...AMZ_WATCH_DEFAULTS, enabled: true, remotePaused: false,
+                                             stores: DEFAULTS.stores });
+  const asins = amzAsins(s.amzWatchList);
+  if (!s.amzWatch || !s.enabled || !asins.length) {
+    await amzStatus(s.amzWatch && !asins.length ? "⚠ No Amazon product IDs in the list" : "");
+    return;                                         // stopped; the 30 s alarm / a settings change starts it again
+  }
+  const every = Math.max(5, Number(s.amzWatchSec) || 15) * 1000;
+  amzBusy = true;
+  try {
+    if (s.remotePaused || (s.stores && s.stores.amazon === false)) {
+      await amzStatus(s.remotePaused ? "⏸ Paused from Telegram" : "Amazon is switched off above");
+    } else if (Date.now() < amzPauseUntil) {
+      await amzStatus(`⚠ Amazon showed a captcha – checking again at ${new Date(amzPauseUntil).toLocaleTimeString()}`);
+    } else {
+      // last seen stock per card, kept for the browser session (survives the worker restarting)
+      const { amzLast = {} } = await chrome.storage.session.get("amzLast");
+      const back = [];
+      let changed = false, ok = 0;
+      for (let i = 0; i < asins.length; i++) {
+        if (i) await new Promise((r) => setTimeout(r, 400 + Math.random() * 600));
+        const res = await amzCheck(asins[i]);
+        if (res === "blocked") {
+          amzPauseUntil = Date.now() + 5 * 60 * 1000;
+          await log("Amazon check: Amazon showed a captcha – pausing for 5 min (raise the seconds in Options if it keeps happening)");
+          break;
+        }
+        if (!res) continue;                         // couldn't tell this round: keep the last state
+        ok++;
+        const prev = amzLast[asins[i]];
+        if (prev !== res.inStock) { amzLast[asins[i]] = res.inStock; changed = true; }
+        // only a change from sold out to in stock opens the card (not what's in stock when Chrome starts)
+        if (res.inStock && prev === false) back.push({ id: asins[i], title: res.title, value: amzValue(res.title) });
+      }
+      if (changed) await chrome.storage.session.set({ amzLast });
+      if (Date.now() >= amzPauseUntil) {
+        const inStock = asins.filter((a) => amzLast[a] === true).length;
+        await amzStatus(ok ? `● Checking ${asins.length} card${asins.length > 1 ? "s" : ""} every ${every / 1000} s · ${inStock} in stock`
+                           : "⚠ Couldn't read the Amazon pages – check the product IDs");
+      }
+      if (back.length) {
+        back.sort((a, b) => (a.value || 0) - (b.value || 0));      // highest value last: that tab clicks through
+        await log(`Amazon check: back in stock – ${back.map((b) => b.title.slice(0, 50)).join(" | ")}`);
+        await handleAlert({ v: 1, local: true, ts: Date.now() / 1000, store: "amazon", store_name: "Amazon",
+          items: back.map((b) => ({ id: b.id, title: b.title, url: `https://www.amazon.in/dp/${b.id}`, value: b.value, price: null })) });
+      }
+    }
+  } catch (e) {
+    await log(`Amazon check failed: ${e.message || e}`);
+  } finally {
+    amzBusy = false;
+    if (!amzTimer) amzTimer = setTimeout(amzWatchRun, every + Math.random() * 2000);
+  }
+}
+
+chrome.storage.onChanged.addListener((c, area) => {
+  if (area === "local" && (c.amzWatch || c.amzWatchSec || c.amzWatchList || c.enabled)) amzWatchKick();
+});
+amzWatchKick();

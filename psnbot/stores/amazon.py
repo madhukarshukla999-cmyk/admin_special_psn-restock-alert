@@ -119,7 +119,9 @@ class Amazon(Store):
 
     async def _check_many(self, client, asins: list[str]) -> list[Item]:
         items, errors = [], []
-        for asin in asins:   # sequential + pauses: Amazon is touchy
+        for n, asin in enumerate(asins):   # sequential + pauses: Amazon is touchy
+            if n:
+                await self.polite_pause(1.5, 3.0)    # between listings only, not after the last one
             try:
                 item = await self._check_one(client, asin)
             except StoreError as e:
@@ -128,7 +130,9 @@ class Amazon(Store):
                 item = Item(store=self.id, item_id=asin, title=asin, url=dp_url(asin), in_stock=None)
             if item:
                 items.append(item)
-            await self.polite_pause(1.5, 3.0)
+                if item.in_stock and self.on_found:
+                    # alert now; the other listings are still being checked
+                    await self.on_found(client, [item])
         if errors and len(errors) == len(asins):
             raise StoreError(errors[0])
         return items

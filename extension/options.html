@@ -135,6 +135,20 @@
 </section>
 
 <section class="card">
+  <h2>👀 Check Amazon from this browser</h2>
+  <p class="muted small">Checks these Amazon cards from your own internet connection every few seconds and opens
+    <b>Buy Now</b> the moment one comes back, usually well before the bot's alert arrives. The pages are loaded
+    <b>without your Amazon login</b>. Only works while this browser is open. Turn it on in <b>one</b> browser only.</p>
+  <label class="switch"><input type="checkbox" id="amzWatch"><span></span><i class="lbl">Check Amazon from this browser</i></label>
+  <label class="field">Cards to check <span class="hint inline">one per line: product ID or amazon.in link (not amzn.in short links)</span>
+    <textarea id="amzWatchList" rows="3" spellcheck="false"></textarea></label>
+  <label class="field">Check every
+    <div class="suffix"><input type="number" id="amzWatchSec" min="5" step="1"><span>sec</span></div>
+    <span class="hint">5 s minimum. Each check downloads every page in the list (a few hundred KB each), so a long list at a short interval uses a lot of data. If Amazon shows a captcha it pauses for 5 min; then use a longer interval.</span></label>
+  <div class="muted small" id="amzWatchInfo"></div>
+</section>
+
+<section class="card">
   <h2>📲 QR to Telegram <span class="tag">owner only</span></h2>
   <p class="muted small">GamesTheShop (Paytm) and Amazon UPI QRs.</p>
   <div class="seg" id="qrModeSeg">

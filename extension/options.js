@@ -6,6 +6,7 @@ const DEFAULTS = {
   stores: { gamestheshop: true, amazon: true, others: true },
   // keep in step with AMZ_WATCH_DEFAULTS in background.js
   amzWatch: false, amzWatchSec: 15, amzWatchInfo: "", amzGiftEmail: "",
+  gtsWatch: false, gtsWatchSec: 1, gtsWatchInfo: "",                    // keep in step with GTS_WATCH_DEFAULTS
   amzWatchList: "B093QF35KZ  ₹2000 card\nB07K6RYVJ5  ₹4000 card\nB0C1H3K2V4  PlayStation E-Gift Card\nB07K6PVR8B  PlayStation card",
 };
 let editing = false, typing = false;
@@ -111,6 +112,8 @@ async function load() {
   $("amzWatch").checked = s.amzWatch; $("amzWatchSec").value = s.amzWatchSec || 15;
   $("amzWatchList").value = s.amzWatchList; $("amzGiftEmail").value = s.amzGiftEmail || "";
   $("amzWatchInfo").textContent = s.amzWatch ? s.amzWatchInfo || "Starting…" : "";
+  $("gtsWatch").checked = s.gtsWatch; $("gtsWatchSec").value = s.gtsWatchSec || 1;
+  $("gtsWatchInfo").textContent = s.gtsWatch ? s.gtsWatchInfo || "Starting…" : "";
   const group = /^-/.test(s.tgChatId || "");
   $("chatWarn").classList.toggle("hidden", !group);
   $("chatWarn").textContent = group ? "⚠ The chat ID is a group – everyone in it would see QRs and payment results. Use your own chat ID." : "";
@@ -208,6 +211,7 @@ $("save").onclick = async () => {
     stores: { gamestheshop: $("st_gamestheshop").checked, amazon: $("st_amazon").checked, others: $("st_others").checked },
     amzWatch: $("amzWatch").checked, amzWatchSec: Math.max(5, Number($("amzWatchSec").value) || 15),
     amzWatchList: $("amzWatchList").value.trim(),
+    gtsWatch: $("gtsWatch").checked, gtsWatchSec: Math.max(1, Number($("gtsWatchSec").value) || 1),
   });
   chrome.runtime.sendMessage({ type: "settings-changed" }).catch(() => {});
   $("save").textContent = "Saved ✓"; setTimeout(() => ($("save").textContent = "Save"), 1500);
@@ -238,7 +242,7 @@ $("cardExpiry").addEventListener("input", (e) => {       // 1227 -> 12/27 as you
   const d = e.target.value.replace(/\D/g, "").slice(0, 4);
   e.target.value = d.length > 2 ? d.slice(0, 2) + "/" + d.slice(2) : d;
 });
-for (const id of ["cardNumber", "cardExpiry", "cardName", "cardCvv", "cardLast4", "amzWatchList", "amzWatchSec", "amzGiftEmail"]) {
+for (const id of ["cardNumber", "cardExpiry", "cardName", "cardCvv", "cardLast4", "amzWatchList", "amzWatchSec", "amzGiftEmail", "gtsWatchSec"]) {
   $(id).addEventListener("focus", () => (typing = true));
   $(id).addEventListener("blur", () => { typing = false; });
 }

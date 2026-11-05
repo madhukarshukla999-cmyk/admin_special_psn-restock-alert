@@ -138,6 +138,19 @@
 </section>
 
 <section class="card">
+  <h2>👀 Check GamesTheShop from this browser</h2>
+  <p class="muted small">Checks every PlayStation card on GamesTheShop from your own internet connection and opens
+    <b>BUY NOW</b> the moment one comes back (after its product page confirms the stock). One small request per check,
+    without your GamesTheShop login. Only works while this browser is open. Turn it on in <b>one</b> browser only.</p>
+  <label class="switch"><input type="checkbox" id="gtsWatch"><span></span><i class="lbl">Check GamesTheShop from this browser</i></label>
+  <label class="field">Check every
+    <div class="suffix"><input type="number" id="gtsWatchSec" min="1" step="1"><span>sec</span></div>
+    <span class="hint">1 s minimum. GamesTheShop allows about 100 requests a minute per connection. If the bot also runs on this
+      internet connection, use 2 s or more. If the shop says "too many requests" it pauses for 1 min.</span></label>
+  <div class="muted small" id="gtsWatchInfo"></div>
+</section>
+
+<section class="card">
   <h2>👀 Check Amazon from this browser</h2>
   <p class="muted small">Checks these Amazon cards from your own internet connection every few seconds and opens
     <b>Buy Now</b> the moment one comes back, usually well before the bot's alert arrives. The pages are loaded

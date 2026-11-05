@@ -537,7 +537,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
 // and opens Buy Now the moment a card comes back. It loads the pages WITHOUT your Amazon login
 // (credentials: "omit"), so the checks have nothing to do with your account. Off by default.
 const AMZ_WATCH_DEFAULTS = { amzWatch: false, amzWatchSec: 15,
-  amzWatchList: "B093QF35KZ  ₹2000 card\nB07K6RYVJ5  ₹4000 card\nB0C1H3K2V4  PlayStation E-Gift Card" };
+  amzWatchList: "B093QF35KZ  ₹2000 card\nB07K6RYVJ5  ₹4000 card\nB0C1H3K2V4  PlayStation E-Gift Card\nB07K6PVR8B  PlayStation card" };
 let amzTimer = null, amzBusy = false, amzPauseUntil = 0;
 
 // ASINs from the Options list: one per line, a bare 10-character ID or any amazon.in product link

@@ -75,6 +75,7 @@ stores:
     product_urls:
       - https://www.amazon.in/dp/B093QF35KZ   # Rs.2000 Sony PlayStation Store Gift Card
       - https://amzn.in/d/0gZDa4MB            # B0C1H3K2V4  PlayStation E-Gift Card (Instant Delivery)
+      - https://www.amazon.in/dp/B07K6PVR8B   # Sony PlayStation Store Gift Card
     # Also checked every `fast_interval_seconds` (restocks here sell out quickly)
     fast_check:
       - https://amzn.in/d/0aGMkk6l            # B07K6RYVJ5  Rs.4000 Sony PlayStation Store Gift Card

@@ -293,6 +293,31 @@ async function amazonFrame(job) {
 const AMZ_STUCK = "Amazon: pressed 'Use this payment method' but the page didn't move on – " +
   "pick 'Scan and Pay with UPI' and press it yourself. ";
 
+// true as soon as test() is true (checked every 100 ms), false after ms
+async function waitFor(test, ms) {
+  for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) {
+    try { if (test()) return true; } catch { /* ignore */ }
+  }
+  return false;
+}
+
+// The decline button of a Prime / offers page shown during checkout ("No Thanks"), or null
+function amzSkipOffer() {
+  if (!/\/(checkout|gp\/buy)\//.test(location.pathname)) return null;
+  const no = textEl(/^(no,? thanks?|no thank you|not now|skip( this)?|maybe later|continue without (prime|offers?|subscribing))$/i,
+                    "a, button, input[type=submit], span, label");
+  if (!no || !(/\/offers/.test(location.pathname) || /prime/i.test(document.body.innerText))) return null;
+  const el = clickable(no);
+  return enabled(el) ? el : null;
+}
+
+// Amazon's own error / notice text on the page (e.g. why Add to Cart didn't work)
+function amzAlertText() {
+  const el = [...document.querySelectorAll(".a-alert-content, [role=alert], #attach-warning-display, .a-color-error")]
+    .find((e) => visible(e) && (e.innerText || "").trim().length > 3);
+  return el ? el.innerText.trim().replace(/\s+/g, " ").slice(0, 160) : "";
+}
+
 async function amazonCheckout(job) {
   const o = await chrome.storage.local.get({ amazonUpiQr: true });
   const manual = "Amazon: checkout open – pick how to pay and finish it yourself.";
@@ -306,12 +331,30 @@ async function amazonCheckout(job) {
   // 1) payment-method page: choose "Scan and Pay with UPI", then "Use this payment method"
   // 2) review page: press "Pay with UPI" (only then – never "Place your order" for card/COD)
   const what = await find(() => {
+    if (amzSkipOffer()) return "offer";
     if (amzPayWithUpi() && amzQrChosen()) return "pay";
     if (amzUpiQrOption()) return "choose";
     if (frameState.chosen) return "frame";
     if (job.step !== "changepay" && amzChangePayment() && textEl(/^(place your order|pay with|pay now)/i)) return "change";
     return null;
   }, 25000);
+
+  if (what === "offer") {
+    // Prime / offers page in the middle of checkout: always decline (never "Continue with Prime")
+    const mine = await chrome.runtime.sendMessage({ type: "claim", what: "amzoffer" + location.pathname }).catch(() => true);
+    if (!mine) return;
+    await step("offer", "Amazon: Prime/offer page – clicking 'No Thanks'…");
+    realClick(amzSkipOffer());
+    if (await waitFor(() => moved() || !amzSkipOffer(), 5000)) return moved() ? undefined : amazonCheckout({ ...job, step: "offer" });
+    // still there: its plain "Next step" button (nothing that joins / starts / tries anything)
+    const next = textEl(/^(next step|continue)$/i, "a, button, input[type=submit], span");
+    if (next) {
+      await step("offer", "Amazon: offer page – clicking 'Next step'…");
+      realClick(clickable(next));
+      if (await waitFor(() => moved() || !amzSkipOffer(), 5000)) return moved() ? undefined : amazonCheckout({ ...job, step: "offer" });
+    }
+    return step("checkout", "Amazon: stuck on the Prime/offer page – press 'No Thanks' yourself, then pay. " + amzDiag(), true);
+  }
 
   if (what === "pay") {
     await step("paid", "Amazon: review page – clicking 'Pay with UPI'…");
@@ -441,15 +484,22 @@ async function amazon(job) {
     }
     // Add to Cart may show a side panel on the same page with "Proceed to checkout"
     const go = await find(AMZ_PROCEED, 8000);
-    if (go) { await step("proceed"); go.click(); }
+    if (go) { await step("proceed"); go.click(); return; }
+    // still on the product page and Amazon shows an error: say what it said (without an error the
+    // cart page may just be slow to load, and it carries on from there)
+    const msg = !leaving && !moved() && amzAlertText();
+    if (msg) return step("none", `Amazon: Add to Cart didn't go through – Amazon says: "${msg}". Finish in the tab. ` + amzDiag(), true);
     return;
   }
 
   if (/\/(gp\/cart|cart)/.test(path) || job.step === "added") {
     const btn = await find(() => AMZ_PROCEED() ||
       (/your amazon cart is empty/i.test(document.body.innerText) && "empty"), 10000);
-    if (btn === "empty")
-      return step("none", "Amazon: the cart is empty – the card sold out before it could be added.", true);
+    if (btn === "empty") {
+      const msg = amzAlertText();
+      return step("none", "Amazon: the cart is empty – Amazon didn't add the card (sold out, a per-customer limit, " +
+                          "or an option like the amount wasn't picked)" + (msg ? `. Amazon says: "${msg}"` : "") + ".", true);
+    }
     if (btn) { await step("proceed"); btn.click(); return; }
     return step("none", "Amazon: couldn't find 'Proceed to Buy' – finish in the tab.", true);
   }

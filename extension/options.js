@@ -5,7 +5,7 @@ const DEFAULTS = {
   browserType: "", profileName: "", accountName: "", setupDone: false, remotePaused: false,
   stores: { gamestheshop: true, amazon: true, others: true },
   // keep in step with AMZ_WATCH_DEFAULTS in background.js
-  amzWatch: false, amzWatchSec: 15, amzWatchInfo: "",
+  amzWatch: false, amzWatchSec: 15, amzWatchInfo: "", amzGiftEmail: "",
   amzWatchList: "B093QF35KZ  ₹2000 card\nB07K6RYVJ5  ₹4000 card\nB0C1H3K2V4  PlayStation E-Gift Card\nB07K6PVR8B  PlayStation card",
 };
 let editing = false, typing = false;
@@ -109,7 +109,7 @@ async function load() {
   $("upiId").value = s.upiId || "";
   for (const k of ["gamestheshop", "amazon", "others"]) $("st_" + k).checked = s.stores[k];
   $("amzWatch").checked = s.amzWatch; $("amzWatchSec").value = s.amzWatchSec || 15;
-  $("amzWatchList").value = s.amzWatchList;
+  $("amzWatchList").value = s.amzWatchList; $("amzGiftEmail").value = s.amzGiftEmail || "";
   $("amzWatchInfo").textContent = s.amzWatch ? s.amzWatchInfo || "Starting…" : "";
   const group = /^-/.test(s.tgChatId || "");
   $("chatWarn").classList.toggle("hidden", !group);
@@ -188,7 +188,16 @@ $("editSetup").onclick = () => { editing = true; load(); $("setup").scrollIntoVi
 
 // ---------- save other settings ----------
 $("save").onclick = async () => {
+  const giftEmail = $("amzGiftEmail").value.trim();
+  const badEmail = giftEmail && !/^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/.test(giftEmail);
+  flag("amzGiftEmail", badEmail);
+  if (badEmail) {
+    $("save").textContent = "Check the e-gift card email"; setTimeout(() => ($("save").textContent = "Save"), 2500);
+    $("amzGiftEmail").scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
   await chrome.storage.local.set({
+    amzGiftEmail: giftEmail,
     enabled: $("enabled").checked, autoClick: $("autoClick").checked, sound: $("sound").checked,
     maxPrice: Number($("maxPrice").value) || 0, clickPayNow: $("clickPayNow").checked, amazonUpiQr: $("amazonUpiQr").checked,
     tgQr: qrModeVal() !== "off", qrMode: qrModeVal() === "off" ? "dm" : qrModeVal(), amzMobile: mobileOf($("amzMobile").value), gtsPayWith: $("gtsPayWith").value,
@@ -229,7 +238,7 @@ $("cardExpiry").addEventListener("input", (e) => {       // 1227 -> 12/27 as you
   const d = e.target.value.replace(/\D/g, "").slice(0, 4);
   e.target.value = d.length > 2 ? d.slice(0, 2) + "/" + d.slice(2) : d;
 });
-for (const id of ["cardNumber", "cardExpiry", "cardName", "cardCvv", "cardLast4", "amzWatchList", "amzWatchSec"]) {
+for (const id of ["cardNumber", "cardExpiry", "cardName", "cardCvv", "cardLast4", "amzWatchList", "amzWatchSec", "amzGiftEmail"]) {
   $(id).addEventListener("focus", () => (typing = true));
   $(id).addEventListener("blur", () => { typing = false; });
 }

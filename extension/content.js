@@ -945,6 +945,35 @@ async function watchPayment(baselineOk) {
   }
 }
 
+// ---- every finished order in a tab the extension opened → Telegram (any QR mode, also if you
+// finished checkout by hand). Only order-confirmation pages count, never product / cart / payment pages.
+const ORDER_DONE_URL = /\/(thankyou|thank-you|order-?success|order-?confirm(ation)?|payment-?success)\b|\/gp\/buy\/thankyou/i;
+const NOT_DONE_URL = /\/(dp|gp\/product|gp\/aw\/d|product|cart|gp\/cart|ap\/signin|login)\//i;
+// stricter than PAY_OK: e.g. a footer "thank you for shopping with us" must not count
+const PURCHASE_OK = /order (has been |was )?(placed|confirmed)( successfully)?|payment (was |is |has been )?successful|transaction successful|paid successfully|thank you for your (order|purchase)/i;
+let purchaseWatching = false;
+async function watchPurchase() {
+  if (purchaseWatching || window !== window.top) return;
+  purchaseWatching = true;
+  const found = () => {
+    if (NOT_DONE_URL.test(location.pathname + "/")) return null;
+    // a short visible heading / message, not a FAQ question ("what if my payment failed?")
+    const ok = payLines(PURCHASE_OK).filter((x) => !x.includes("?") && !PAY_FAIL.test(x));
+    if (ok.length && !payLines(PAY_FAIL).filter((x) => !x.includes("?")).length) return ok.sort((a, b) => a.length - b.length)[0];
+    return ORDER_DONE_URL.test(location.pathname) && /order/i.test(document.body.innerText) ? "Order confirmation page" : null;
+  };
+  for (const end = Date.now() + 15 * 60 * 1000; Date.now() < end && !leaving; await sleep(1000)) {
+    const line = (() => { try { return found(); } catch { return null; } })();
+    if (!line) continue;
+    await sleep(800);                                  // order number / amount often appear a moment later
+    const txt = document.body.innerText || "";
+    const order = (txt.match(/order\s*(?:id|no\.?|number|#)\s*[:#]?\s*([A-Za-z0-9_\-]{6,})/i) || [])[1] || "";
+    const amount = (txt.match(/(?:total|amount|paid)[^₹\n]{0,30}₹\s?([\d,]+(?:\.\d{1,2})?)/i) || [])[1] || "";
+    await chrome.runtime.sendMessage({ type: "purchase", line, order, amount }).catch(() => {});
+    return;
+  }
+}
+
 function log0(note) { return chrome.runtime.sendMessage({ type: "job-step", step: "card-fallback", note }).catch(() => {}); }
 
 async function getJob() {
@@ -963,6 +992,8 @@ async function getJob() {
   detectAmazonAccount().catch(() => {});
   if (window === window.top) {             // a tab whose QR is still waiting: watch it for the result
     chrome.runtime.sendMessage({ type: "watch?" }).then((w) => { if (w) watchPayment(true); }).catch(() => {});
+    // any tab opened for a restock: report the order when it's placed
+    chrome.runtime.sendMessage({ type: "purchase-watch?" }).then((r) => { if (r) watchPurchase(); }).catch(() => {});
   }
   const isPaytm = /(^|\.)paytm(payments)?\.(in|com)$/.test(host);
   const isAmazon = host === "amazon.in" || host.endsWith(".amazon.in");

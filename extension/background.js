@@ -142,6 +142,9 @@ async function handleAlert(data) {
     // Always the product page: Amazon's cart-add link (cart_url) often lands on an empty cart.
     const tab = await chrome.tabs.create({ url: safeUrl(it.url), active: i === last,
                                            ...(win ? { windowId: win.id } : {}) });
+    // every tab opened for a restock is watched for a finished order (reported to Telegram)
+    await chrome.storage.session.set({ [openedKey(tab.id)]: { store: data.store, storeName: data.store_name,
+      title: it.title, value: it.value || amzValue(it.title) || null, price: it.price || null, test: !!data.test, ts: Date.now() } });
     if (clickThrough) await setJob(tab.id, { store: data.store, step: "start", started: Date.now(),
                                              title: it.title, storeName: data.store_name, test: !!data.test });
     opened.push(`${it.title}${clickThrough ? " (auto-click)" : ""}`);
@@ -208,6 +211,14 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     return true;
   }
   if (msg.type === "qr-result" && sender.tab) { qrResult(sender.tab, msg).then((ok) => reply(ok)); return true; }
+  if (msg.type === "purchase-watch?" && sender.tab) {        // a tab we opened, not reported yet?
+    chrome.storage.session.get(openedKey(sender.tab.id)).then((o) => {
+      const r = o[openedKey(sender.tab.id)];
+      reply(r && !r.reported && Date.now() - r.ts < 60 * 60 * 1000 ? r : null);
+    });
+    return true;
+  }
+  if (msg.type === "purchase" && sender.tab) { purchaseDone(sender.tab, msg).then((ok) => reply(ok)); return true; }
   if (msg.type === "connected-report") {
     (async () => {
       const s = await settings();
@@ -387,8 +398,10 @@ chrome.alarms.onAlarm.addListener((a) => {
 
 // The payment tab reported the result (content script watches the page text).
 async function qrResult(tab, msg) {
+  if (msg.result === "success" && !claimReport(tab.id)) return false;      // already reported
   const q = (await chrome.storage.local.get(qrKey(tab.id)))[qrKey(tab.id)];
-  if (!q) return false;
+  if (!q) { if (msg.result === "success") reportedTabs.delete(tab.id); return false; }
+  if (msg.result === "success") await markReported(tab.id);
   await chrome.storage.local.remove(qrKey(tab.id));
   chrome.alarms.clear(qrKey(tab.id));
   await tg("deleteMessage", { chat_id: q.chatId, message_id: q.msgId });   // QR no longer needed
@@ -410,6 +423,56 @@ async function qrResult(tab, msg) {
   return true;
 }
 
+
+// ---- every finished purchase → Telegram (whatever the QR mode, also when you finished by hand) ----
+// opened_<tabId> = { store, storeName, title, value, price, test, ts, reported } (session storage)
+const openedKey = (tabId) => "opened_" + tabId;
+const reportedTabs = new Set();          // checked + set before any await: one report per tab, ever
+function claimReport(tabId) {
+  if (reportedTabs.has(tabId)) return false;
+  reportedTabs.add(tabId);
+  return true;
+}
+async function markReported(tabId) {
+  const k = openedKey(tabId), r = (await chrome.storage.session.get(k))[k];
+  if (r) await chrome.storage.session.set({ [k]: { ...r, reported: true } });
+}
+
+// The content script saw an order-confirmation page in a tab we opened for a restock.
+async function purchaseDone(tab, msg) {
+  const k = openedKey(tab.id), rec = (await chrome.storage.session.get(k))[k];
+  if (!rec || rec.reported) return false;
+  // the QR flow is watching this tab: let it report (it also removes the QR from Telegram)
+  if ((await chrome.storage.local.get(qrKey(tab.id)))[qrKey(tab.id)])
+    return qrResult(tab, { result: "success", line: msg.line, order: msg.order });
+  if (!claimReport(tab.id)) return false;
+  await markReported(tab.id);
+  const s = await chrome.storage.local.get({ tgToken: "", tgChatId: "", browserName: "", browserType: "", profileName: "",
+    accountName: "", gtsMobile: "", amzMobile: "", gtsAccount: null, amzAccount: null });
+  const amazon = rec.store === "amazon";
+  const acc = amazon ? (s.amzAccount || {}) : (s.gtsAccount || {});
+  const mobile = amazon ? s.amzMobile : (s.gtsMobile || acc.mobile || "");
+  const amount = rec.value || msg.amount || rec.price || "";
+  const q = { storeName: rec.storeName || rec.store, title: rec.title || "PSN card", amount: amount ? String(amount) : "",
+              order: msg.order || "", account: s.browserName || acc.name || s.accountName || "", mobile, test: rec.test };
+  reportPurchase(q, msg).catch(() => {});                   // for the bot's weekly report
+  await log(`Purchase complete: ${q.storeName} ${q.title}${q.order ? " · order " + q.order : ""} · ${q.account || "this browser"}`);
+  chrome.notifications.create({ type: "basic", iconUrl: "icon.png", priority: 2, title: "✅ Purchase complete",
+    message: `${q.title} · ${q.account || "this browser"}` });
+  if (!s.tgToken || !s.tgChatId) { await log("Purchase not sent to Telegram: connect the extension with a setup code from /extension"); return false; }
+  const text = [`✅ ${q.test ? "TEST · " : ""}PURCHASE COMPLETE`, ...resultLines(q),
+                `🌐 ${s.browserType || "?"} · 🗂 ${s.profileName || "?"}`,
+                ...(msg.line ? [`"${msg.line.slice(0, 120)}"`] : [])].join("\n");
+  let shot = null;
+  if (await chrome.permissions.contains({ origins: ["<all_urls>"] })) {
+    await new Promise((r) => setTimeout(r, 1200));             // let the page finish drawing
+    shot = await screenshotCrop(tab, null).catch(() => null);
+  }
+  const j = shot ? await tg("sendPhoto", { chat_id: s.tgChatId, caption: text.slice(0, 1024) }, { field: "photo", blob: shot, name: "order.png" })
+                 : await tg("sendMessage", { chat_id: s.tgChatId, text });
+  if (!j.ok) await log(`Purchase report to Telegram failed: ${j.description || "error"}`);
+  return !!j.ok;
+}
 
 // ---- pause / resume from Telegram (/extension off|on or the button) ----
 // The latest control message is read from the feed on every (re)connect, so a browser that was

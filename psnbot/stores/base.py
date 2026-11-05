@@ -16,6 +16,8 @@ class Store:
     # Set by the bot: `await on_found(client, items)` for in-stock cards found partway through a
     # check, so they're alerted right away instead of after the rest of the check (see Amazon).
     on_found = None
+    # Set by the bot from config `only_values`: card values to track (empty = every value)
+    only_values: frozenset = frozenset()
 
     def __init__(self, cfg: dict, title_filter: TitleFilter):
         self.cfg = cfg or {}
@@ -27,6 +29,11 @@ class Store:
     async def fetch_fast(self, client: httpx.AsyncClient) -> list[Item] | None:
         """Priority listings checked on the fast interval. None = store has none."""
         return None
+
+    def wanted(self, item: Item) -> bool:
+        """Is this card value tracked? Cards whose value can't be read are kept (better to tell)."""
+        d = item.denomination
+        return not self.only_values or d is None or d in self.only_values
 
     # -- helpers ---------------------------------------------------------
     async def get(self, client: httpx.AsyncClient, url: str, **kw) -> httpx.Response:

@@ -4,6 +4,9 @@
 interval_seconds: 60           # full check of each store (stores can override below; /cycles to change live)
 interval_jitter_seconds: 10    # random +/- so requests don't look robotic
 fast_interval_seconds: 20      # priority checks (fast_check stores); 0 = off
+# Only these card values are tracked and alerted, on every store (others are ignored; a card whose
+# value can't be read from its title is kept). Remove the line or leave it empty for every value.
+only_values: [1000, 2000, 3000, 4000, 5000]
 
 # Burst mode: check much faster around each store's usual restock time.
 # Windows are learned from history (/besttime, needs 3+ restocks on 2+ days) and/or set here.

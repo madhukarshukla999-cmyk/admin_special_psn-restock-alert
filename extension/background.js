@@ -109,7 +109,7 @@ async function handleAlert(data) {
     const before = (data.items || []).length;
     data = { ...data, items: await claimNew(data) };
     if (!data.items.length) {
-      if (before && !data.local) await log(`${data.store_name}: already opened by this browser's own Amazon check`);
+      if (before && !data.local) await log(`${data.store_name}: already opened by this browser's own check`);
       return;
     }
   }
@@ -119,6 +119,13 @@ async function handleAlert(data) {
   if (!storeOn && !data.test) { await log(`Skipped ${data.store_name} (turned off)`); return; }
 
   let items = (data.items || []).filter((i) => safeUrl(i.url));
+  const vals = await allowedValues();
+  if (vals) {                                        // Options → "Card values": only those (unknown value = keep)
+    const skip = items.filter((i) => { const v = i.value || amzValue(i.title); return v && !vals.has(v); });
+    if (skip.length) await log(`${data.store_name}: ignored ${skip.map((i) => "₹" + (i.value || amzValue(i.title))).join(", ")} (not in your card values)`);
+    items = items.filter((i) => !skip.includes(i));
+    if (!items.length) return;
+  }
   if (s.maxPrice > 0) items = items.filter((i) => !i.price || i.price <= s.maxPrice);
   if (!items.length) { await log(`Skipped ${data.store_name}: no allowed link / over price limit`); return; }
 
@@ -211,7 +218,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     })();
     return true;
   }
-  if (msg.type === "settings-changed") { ensureListener(); amzWatchKick(); return; }
+  if (msg.type === "settings-changed") { ensureListener(); amzWatchKick(); gtsWatchKick(); return; }
   if (msg.type === "test") {
     const urls = (msg.urls || [msg.url]).filter(Boolean);
     handleAlert({ test: true, ts: Date.now() / 1000, store: msg.store, store_name: "Test",
@@ -375,7 +382,7 @@ async function tickQrs() {
 
 chrome.alarms.onAlarm.addListener((a) => {
   if (/^qr_\d+$/.test(a.name)) expireQr(Number(a.name.slice(3)));
-  else if (a.name === "keepalive") { tickQrs(); heartbeat(false).catch(() => {}); amzWatchKick(); }
+  else if (a.name === "keepalive") { tickQrs(); heartbeat(false).catch(() => {}); amzWatchKick(); gtsWatchKick(); }
 });
 
 // The payment tab reported the result (content script watches the page text).
@@ -578,6 +585,14 @@ async function amzCheck(asin) {
   return { inStock, title };
 }
 
+// Options → "Card values" (e.g. "1000, 2000, 3000, 4000, 5000"): a Set, or null = every value
+const DEFAULT_VALUES = "1000, 2000, 3000, 4000, 5000";     // keep in step with options.js
+async function allowedValues() {
+  const { onlyValues } = await chrome.storage.local.get({ onlyValues: DEFAULT_VALUES });
+  const set = new Set(String(onlyValues || "").split(/[^\d]+/).filter(Boolean).map(Number).filter((v) => v >= 100));
+  return set.size ? set : null;
+}
+
 // Cards opened recently: "store:id" -> { ts, by: "local" | "bot" } (session storage, so it
 // survives the worker restarting). Check + mark run one alert at a time, so two alerts for
 // the same card arriving together can't both open it.
@@ -669,3 +684,140 @@ chrome.storage.onChanged.addListener((c, area) => {
   if (area === "local" && (c.amzWatch || c.amzWatchSec || c.amzWatchList || c.enabled)) amzWatchKick();
 });
 amzWatchKick();
+
+// ---- GamesTheShop: check from this browser too (Options → "Check GamesTheShop from this browser") ----
+// Same small stock API the bot uses (psnbot/stores/gamestheshop.py): one ~12 KB search request per
+// check. The search list can say "In Stock" for minutes after a card sells out, so a card only
+// counts as back once its product page's own request (live stock) agrees, like the bot does.
+const GTS_API = "https://green-api.gamestheshop.com/storefront";
+const GTS_WATCH_DEFAULTS = { gtsWatch: false, gtsWatchSec: 1 };
+const GTS_VERIFY_PER_MIN = 30;                    // live-stock requests per minute, on top of the list
+let gtsTimer = null, gtsBusy = false, gtsPauseUntil = 0, gtsFails = 0;
+const gtsLiveCache = {};                          // variant id -> { ts, live }
+
+// The API only answers requests that come from the shop's own site
+chrome.declarativeNetRequest.updateSessionRules({
+  removeRuleIds: [1],
+  addRules: [{ id: 1, priority: 1,
+    action: { type: "modifyHeaders", requestHeaders: [
+      { header: "origin", operation: "set", value: "https://www.gamestheshop.com" },
+      { header: "referer", operation: "set", value: "https://www.gamestheshop.com/" }] },
+    condition: { requestDomains: ["green-api.gamestheshop.com"], initiatorDomains: [chrome.runtime.id],
+                 resourceTypes: ["xmlhttprequest", "other"] } }],
+}).catch(() => {});
+
+const gtsIsPsn = (name) => /playstation|psn/i.test(name) &&
+  !/playstation plus|ps plus|controller|console|memory card|xbox|steam/i.test(name);
+
+// "limited" (429), null (couldn't tell) or the PSN rows: [{ vid, pid, name, price, listed }]
+async function gtsList() {
+  let r;
+  try {
+    r = await fetch(`${GTS_API}/products/filter?page=1&limit=50`, { method: "POST", credentials: "omit", cache: "no-store",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/plain, */*" },
+      body: JSON.stringify({ searchQuery: "gift card" }) });
+  } catch { return null; }
+  if (r.status === 429) return "limited";
+  if (!r.ok) return null;
+  const rows = (await r.json().catch(() => ({}))).data;
+  if (!Array.isArray(rows)) return null;
+  return rows.filter((p) => gtsIsPsn(p.name || "")).map((p) => {
+    const status = String(p.stock_status || "").toLowerCase().replace(/\s/g, ""), avail = (p.inventory || {}).available_stock;
+    const out = status.includes("out") || (avail != null && avail <= 0);
+    return { vid: p.id, pid: p.product_id, name: String(p.name || "").replace(/\s+/g, " ").trim(),
+             price: p.sale_price || null, listed: !out && status === "instock" };
+  });
+}
+
+// What the product page shows: true / false, "limited", or null (couldn't tell)
+async function gtsLive(pid, vid) {
+  let r;
+  try { r = await fetch(`${GTS_API}/products/${pid}/`, { credentials: "omit", cache: "no-store", headers: { Accept: "application/json" } }); }
+  catch { return null; }
+  if (r.status === 429) return "limited";
+  if (!r.ok) return null;
+  const d = (await r.json().catch(() => ({}))).data || {};
+  const vs = d.variants || [], v = vs.find((x) => x.id === vid) || vs[0];
+  const avail = ((v || {}).inventory || {}).available_stock;
+  if (avail != null) return avail > 0;
+  return !/out of stock/i.test(d.stock_status || "");
+}
+
+async function gtsStatus(text) {
+  const { gtsWatchInfo } = await chrome.storage.local.get({ gtsWatchInfo: "" });
+  if (gtsWatchInfo !== text) await chrome.storage.local.set({ gtsWatchInfo: text });
+}
+
+function gtsWatchKick() {
+  if (!gtsTimer && !gtsBusy) gtsTimer = setTimeout(gtsWatchRun, 300);
+}
+
+async function gtsWatchRun() {
+  gtsTimer = null;
+  const s = await chrome.storage.local.get({ ...GTS_WATCH_DEFAULTS, enabled: true, remotePaused: false, stores: DEFAULTS.stores });
+  if (!s.gtsWatch || !s.enabled) { await gtsStatus(""); return; }      // the 30 s alarm / a settings change starts it again
+  const every = Math.max(1, Number(s.gtsWatchSec) || 1) * 1000;
+  gtsBusy = true;
+  try {
+    if (s.remotePaused || (s.stores && s.stores.gamestheshop === false)) {
+      await gtsStatus(s.remotePaused ? "⏸ Paused from Telegram" : "GamesTheShop is switched off above");
+    } else if (Date.now() < gtsPauseUntil) {
+      await gtsStatus(`⚠ GamesTheShop asked to slow down – checking again at ${new Date(gtsPauseUntil).toLocaleTimeString()}`);
+    } else {
+      let rows = await gtsList();
+      if (rows === "limited") {
+        gtsPauseUntil = Date.now() + 60 * 1000;
+        await log("GamesTheShop check: too many requests (HTTP 429) – pausing 1 min. If it keeps happening, use a longer interval in Options.");
+      } else if (!rows) {
+        if (++gtsFails >= 5) await gtsStatus("⚠ Couldn't read GamesTheShop's stock list");
+      } else {
+        gtsFails = 0;
+        const vals = await allowedValues();          // only the card values you want (no requests for the rest)
+        if (vals) rows = rows.filter((r) => { const v = amzValue(r.name); return !v || vals.has(v); });
+        const { gtsLast = {} } = await chrome.storage.session.get("gtsLast");
+        const now = Date.now();
+        // live-check cards the list calls in stock: straight away when the list just changed,
+        // otherwise spread out to stay within GTS_VERIFY_PER_MIN
+        const listed = rows.filter((r) => r.listed);
+        for (const r of rows) if (!r.listed) delete gtsLiveCache[r.vid];
+        const gap = Math.max(3000, listed.length * 60000 / GTS_VERIFY_PER_MIN);
+        const due = listed.filter((r) => !gtsLiveCache[r.vid] || now - gtsLiveCache[r.vid].ts >= gap);
+        const res = await Promise.all(due.map((r) => gtsLive(r.pid, r.vid)));
+        due.forEach((r, i) => {
+          if (res[i] === "limited") gtsPauseUntil = Date.now() + 60 * 1000;
+          else if (res[i] !== null) gtsLiveCache[r.vid] = { ts: now, live: res[i] };
+        });
+        const back = [];
+        let changed = false;
+        for (const r of rows) {
+          const cur = !r.listed ? false : gtsLiveCache[r.vid] ? gtsLiveCache[r.vid].live : undefined;
+          if (cur === undefined) continue;            // couldn't tell this round: keep the last state
+          const prev = gtsLast[r.vid];
+          if (prev !== cur) { gtsLast[r.vid] = cur; changed = true; }
+          if (cur && prev === false) back.push(r);    // sold out -> in stock (not what's in stock at start)
+        }
+        if (changed) await chrome.storage.session.set({ gtsLast });
+        const inStock = rows.filter((r) => gtsLast[r.vid] === true).length;
+        await gtsStatus(`● Checking ${rows.length} PlayStation cards every ${every / 1000} s · ${inStock} in stock`);
+        if (back.length) {
+          const val = (r) => amzValue(r.name) || 0;
+          back.sort((a, b) => val(a) - val(b));
+          await log(`GamesTheShop check: back in stock – ${back.map((r) => r.name.slice(0, 50)).join(" | ")}`);
+          await handleAlert({ v: 1, local: true, ts: Date.now() / 1000, store: "gamestheshop", store_name: "GamesTheShop",
+            items: back.map((r) => ({ id: r.vid, title: r.name, value: amzValue(r.name), price: r.price,
+              url: `https://www.gamestheshop.com/product/${r.pid}?variant=${r.vid}` })) });
+        }
+      }
+    }
+  } catch (e) {
+    await log(`GamesTheShop check failed: ${e.message || e}`);
+  } finally {
+    gtsBusy = false;
+    if (!gtsTimer) gtsTimer = setTimeout(gtsWatchRun, every + Math.random() * 200);
+  }
+}
+
+chrome.storage.onChanged.addListener((c, area) => {
+  if (area === "local" && (c.gtsWatch || c.gtsWatchSec || c.enabled)) gtsWatchKick();
+});
+gtsWatchKick();

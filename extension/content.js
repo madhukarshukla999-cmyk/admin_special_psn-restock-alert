@@ -447,16 +447,23 @@ function amzGiftForm(buyBtn) {
 }
 
 async function amzFillGiftCard(gc) {
-  const o = await chrome.storage.local.get({ amzGiftEmail: "", accountName: "" });
+  const o = await chrome.storage.local.get({ amzGiftEmail: "", accountName: "", onlyValues: "1000, 2000, 3000, 4000, 5000" });
   if (!o.amzGiftEmail) {
     await step("none", "Amazon: this e-gift card needs a recipient email – set 'Amazon e-gift card email' in Options. Finish this one in the tab.", true);
     return false;
   }
   let note = "the page's own amount";
   if (gc.amounts.length) {
-    const top = gc.amounts.reduce((a, b) => (b.value > a.value ? b : a));
+    // highest amount among your card values (Options → "Card values"; empty = any)
+    const vals = new Set(String(o.onlyValues || "").split(/[^\d]+/).filter(Boolean).map(Number).filter((v) => v >= 100));
+    const ok = vals.size ? gc.amounts.filter((a) => vals.has(a.value)) : gc.amounts;
+    if (!ok.length) {
+      await step("none", `Amazon: e-gift card offers ${gc.amounts.map((a) => "₹" + a.value).join(", ")} – none of your card values. Left it alone.`, true);
+      return false;
+    }
+    const top = ok.reduce((a, b) => (b.value > a.value ? b : a));
     realClick(clickable(top.el));
-    note = `₹${top.value.toLocaleString("en-IN")} (highest of ${gc.amounts.map((a) => a.value).join(", ")})`;
+    note = `₹${top.value.toLocaleString("en-IN")} (highest of your values among ${gc.amounts.map((a) => a.value).join(", ")})`;
     await sleep(300);
   }
   // the email box may only appear (or be re-drawn) after the amount is picked

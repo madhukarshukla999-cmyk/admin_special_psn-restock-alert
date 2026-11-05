@@ -45,7 +45,8 @@ class GamesTheShop(Store):
         return "out of stock" not in (d.get("stock_status") or "").lower()
 
     async def _verify(self, client, items: list[Item]) -> None:
-        listed = [i for i in items if i.in_stock and i.extra.get("product_id")]
+        # (only card values that are tracked: no live-stock requests for the others)
+        listed = [i for i in items if i.in_stock and i.extra.get("product_id") and self.wanted(i)]
         for vid in [k for k in self._live if k not in {i.item_id for i in listed}]:
             self._live.pop(vid)                    # the list says sold out too: nothing to correct
         if not listed or not self.cfg.get("verify_stock", True):

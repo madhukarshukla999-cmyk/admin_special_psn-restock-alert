@@ -186,6 +186,8 @@ function amzDiag() {
   return `[debug ${location.pathname.slice(0, 40)} | ${window === window.top ? "page" : "frame"} | ` +
          `upi:${!upi ? "none" : isRadio(upi) ? (radioChecked(upi) ? "radio,checked" : "radio,unchecked") : "text-only"} ` +
          `useBtn:${!use ? "none" : enabled(clickable(use)) ? "on" : "grey"} | scanText:${/scan and pay/i.test(document.body.innerText)} ` +
+         `inputs:${JSON.stringify([...document.querySelectorAll("input:not([type=hidden]):not([type=radio]):not([type=submit]), textarea")]
+           .filter((i) => visible(i) && !i.closest("#nav-belt, #navbar")).slice(0, 6).map((i) => fieldText(i, true).replace(/\s+/g, " ").slice(0, 40)))} ` +
          `radios:${document.querySelectorAll('input[type=radio]').length} frames:${JSON.stringify(frames)} btns:${JSON.stringify(btns)}]`;
 }
 // On the order review page: is the chosen payment the UPI QR, and is the button "Pay with UPI"?
@@ -407,25 +409,35 @@ function amzGiftEmailBox() {
 }
 
 // Amount options ("₹1,000", "₹2,000", …): clickable boxes in the gift card form, not prices
+// Variation switchers ("Rs.1000 / Rs.2000 …" swatches) open a different listing: never treat those as amounts
+const AMZ_TWISTER = '[id*="twister"], [id^="variation_"], [class*="twister"], [data-csa-c-slot-id*="twister"]';
+
 function amzGiftAmounts(near) {
   const re = /^(?:₹|rs\.?|inr)?\s*([\d,]{3,7})(?:\.00)?$/i;
+  const label = (e) => ((e.innerText || e.value || "") + "").trim().split("\n")[0].trim();   // "₹1,000" (+ e.g. "5% off" below)
   const hits = [...document.querySelectorAll("button, [role=button], [role=radio], label, li, span, a, input[type=submit], input[type=button]")]
-    .filter((e) => visible(e) && re.test(((e.innerText || e.value || "") + "").trim()) &&
-      e.closest("button, [role=button], [role=radio], label, li, .a-button, input") && !e.closest(AMZ_DISABLED));
+    .filter((e) => visible(e) && re.test(label(e)) &&
+      e.closest("button, [role=button], [role=radio], label, li, .a-button, input") &&
+      !e.closest(AMZ_DISABLED) && !e.closest(AMZ_TWISTER));
   const inner = hits.filter((e) => !hits.some((o) => o !== e && e.contains(o)));
-  let opts = inner.map((e) => ({ el: e, value: Number(((e.innerText || e.value) + "").trim().match(re)[1].replace(/,/g, "")) }))
+  const opts = inner.map((e) => ({ el: e, value: Number(label(e).match(re)[1].replace(/,/g, "")) }))
     .filter((a) => a.value >= 100 && a.value <= 100000);
-  // only the ones in the same form as the email box (the closest box holding 2+ of them)
+  // only the ones in the same form as `near` (the email box, or the Add to Cart / Buy Now button):
+  // the closest box around it holding 2+ amounts. None near it = not a gift card form.
   for (let box = near && near.parentElement, i = 0; box && i < 12; box = box.parentElement, i++) {
     const mine = opts.filter((a) => box.contains(a.el));
-    if (mine.length >= 2) { opts = mine; break; }
+    if (mine.length >= 2) return mine;
   }
-  return opts;
+  return [];
 }
 
-function amzGiftForm() {
+// A gift card order form: a recipient email box, or (when the email box only appears after an
+// amount is picked) 2+ amount buttons around the Add to Cart / Buy Now button.
+function amzGiftForm(buyBtn) {
   const email = amzGiftEmailBox();
-  return email ? { email, amounts: amzGiftAmounts(email) } : null;
+  if (email) return { email, amounts: amzGiftAmounts(email) };
+  const amounts = amzGiftAmounts(buyBtn);
+  return amounts.length ? { email: null, amounts } : null;
 }
 
 async function amzFillGiftCard(gc) {
@@ -441,7 +453,12 @@ async function amzFillGiftCard(gc) {
     note = `₹${top.value.toLocaleString("en-IN")} (highest of ${gc.amounts.map((a) => a.value).join(", ")})`;
     await sleep(300);
   }
-  const box = amzGiftEmailBox() || gc.email;          // the form may have re-drawn after the click
+  // the email box may only appear (or be re-drawn) after the amount is picked
+  const box = (await find(amzGiftEmailBox, 4000)) || (gc.email && gc.email.isConnected ? gc.email : null);
+  if (!box) {
+    await step("none", `Amazon: e-gift card – chose ${note}, but couldn't find the email box. Finish in the tab. ${amzDiag()}`, true);
+    return false;
+  }
   box.focus();
   setValue(box, o.amzGiftEmail);
   box.dispatchEvent(new Event("blur", { bubbles: true }));
@@ -467,7 +484,7 @@ async function amazon(job) {
     if (!btn || btn === "na")
       return step("none", `Amazon: ${btn ? "this card is currently unavailable (sold out)" : "no Buy Now / Add to Cart button " + amzDiag()} – check the tab.`, true);
     // E-gift cards (amount + recipient email) must be filled in before the buttons work
-    const gc = amzGiftForm();
+    const gc = amzGiftForm(btn);
     if (gc) {
       if (!(await amzFillGiftCard(gc))) return;            // says why in the log
       btn = await find(() => AMZ_BUY_NOW() || AMZ_ADD(), 5000);

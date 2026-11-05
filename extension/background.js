@@ -569,7 +569,7 @@ async function amzCheck(asin) {
   const title = unescapeHtml(((html.match(/id="productTitle"[^>]*>([\s\S]*?)</) || [])[1] || "").replace(/\s+/g, " ").trim());
   if (!title) return null;                                     // not a normal product page
   const avail = ((html.match(/id="availability"[\s\S]{0,1500}?<\/div>/) || [""])[0]).replace(/<[^>]+>/g, " ").toLowerCase();
-  const buy = /id="(?:add-to-cart-button|buy-now-button)"/.test(html);
+  const buy = /id="(?:add-to-cart-button|buy-now-button|gc-buy-box-atc|gc-buy-box-bn)"/.test(html);
   let inStock;
   if (/currently unavailable|out of stock/.test(avail)) inStock = false;
   else if (buy) inStock = true;

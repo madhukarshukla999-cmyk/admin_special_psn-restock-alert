@@ -115,7 +115,7 @@ async function gamestheshop(job) {
 // Amazon: product page → Buy Now (straight to checkout); fallback Add to Cart → Proceed to Buy.
 const visible = (e) => e && !e.disabled && (e.offsetParent !== null || e.getClientRects().length > 0);
 const q = (...sels) => () => sels.map((s) => document.querySelector(s)).find(visible) || null;
-const AMZ_BUY_NOW = q("#buy-now-button", 'input[name="submit.buy-now"]', "#buyNow");
+const AMZ_BUY_NOW = q("#buy-now-button", 'input[name="submit.buy-now"]', "#buyNow", "#gc-buy-box-bn");
 const AMZ_ADD = q("#add-to-cart-button", 'input[name="submit.add-to-cart"]', "#gc-buy-box-atc");
 const AMZ_PROCEED = () => q('input[name="proceedToRetailCheckout"]', "#sc-buy-box-ptc-button input",
   "#attach-sidesheet-checkout-button input", "#hlb-ptc-btn-native")() || byText(/^proceed to (buy|checkout)/i)();
@@ -351,15 +351,85 @@ async function amazonCheckout(job) {
   return step("checkout", manual + " " + amzDiag(), true);
 }
 
+// ---- Amazon e-gift cards (e.g. "PlayStation E-Gift Card"): pick an amount + recipient email ----
+const AMZ_DISABLED = '[aria-disabled="true"], .a-button-disabled, [disabled], .a-button-unavailable';
+
+// The recipient email box of a gift card order form (not the site search or sign-in boxes)
+function amzGiftEmailBox() {
+  return [...document.querySelectorAll('input[type="email"], textarea, input[type="text"], input:not([type])')].find((i) => {
+    if (!visible(i) || i.closest("#nav-belt, #navbar, header, form[role=search]")) return false;
+    const t = fieldText(i, true);
+    return /recipient|e-?mail/i.test(t) && !/search|password|sign.?in|phone|mobile/i.test(t);
+  }) || null;
+}
+
+// Amount options ("₹1,000", "₹2,000", …): clickable boxes in the gift card form, not prices
+function amzGiftAmounts(near) {
+  const re = /^(?:₹|rs\.?|inr)?\s*([\d,]{3,7})(?:\.00)?$/i;
+  const hits = [...document.querySelectorAll("button, [role=button], [role=radio], label, li, span, a, input[type=submit], input[type=button]")]
+    .filter((e) => visible(e) && re.test(((e.innerText || e.value || "") + "").trim()) &&
+      e.closest("button, [role=button], [role=radio], label, li, .a-button, input") && !e.closest(AMZ_DISABLED));
+  const inner = hits.filter((e) => !hits.some((o) => o !== e && e.contains(o)));
+  let opts = inner.map((e) => ({ el: e, value: Number(((e.innerText || e.value) + "").trim().match(re)[1].replace(/,/g, "")) }))
+    .filter((a) => a.value >= 100 && a.value <= 100000);
+  // only the ones in the same form as the email box (the closest box holding 2+ of them)
+  for (let box = near && near.parentElement, i = 0; box && i < 12; box = box.parentElement, i++) {
+    const mine = opts.filter((a) => box.contains(a.el));
+    if (mine.length >= 2) { opts = mine; break; }
+  }
+  return opts;
+}
+
+function amzGiftForm() {
+  const email = amzGiftEmailBox();
+  return email ? { email, amounts: amzGiftAmounts(email) } : null;
+}
+
+async function amzFillGiftCard(gc) {
+  const o = await chrome.storage.local.get({ amzGiftEmail: "", accountName: "" });
+  if (!o.amzGiftEmail) {
+    await step("none", "Amazon: this e-gift card needs a recipient email – set 'Amazon e-gift card email' in Options. Finish this one in the tab.", true);
+    return false;
+  }
+  let note = "the page's own amount";
+  if (gc.amounts.length) {
+    const top = gc.amounts.reduce((a, b) => (b.value > a.value ? b : a));
+    realClick(clickable(top.el));
+    note = `₹${top.value.toLocaleString("en-IN")} (highest of ${gc.amounts.map((a) => a.value).join(", ")})`;
+    await sleep(300);
+  }
+  const box = amzGiftEmailBox() || gc.email;          // the form may have re-drawn after the click
+  box.focus();
+  setValue(box, o.amzGiftEmail);
+  box.dispatchEvent(new Event("blur", { bubbles: true }));
+  if (box.value.trim() !== o.amzGiftEmail) {
+    await step("none", `Amazon: e-gift card – couldn't type the email into the form. Finish in the tab. ${amzDiag()}`, true);
+    return false;
+  }
+  // "From" name, if the form wants one and it's empty
+  const from = [...document.querySelectorAll('input[type="text"], input:not([type])')].find((i) =>
+    visible(i) && !i.value && /\bfrom\b|sender/i.test(fieldText(i, false)));
+  if (from && o.accountName) setValue(from, o.accountName);
+  await step("giftfilled", `Amazon: e-gift card – chose ${note}, recipient ${o.amzGiftEmail}`);
+  return true;
+}
+
 async function amazon(job) {
   const path = location.pathname;
   if (/\/(checkout|gp\/buy)\//.test(path) || /\/spc\//.test(path)) return amazonCheckout(job);
   if (/\/ap\/signin/.test(path)) return step("login", "Amazon: please log in in this browser once.", true);
 
-  if (/\/(dp|gp\/product|gp\/aw\/d)\//.test(path) && job.step === "start") {
-    const btn = await find(() => AMZ_BUY_NOW() || AMZ_ADD() || (amazonUnavailable() && "na"), 12000);
+  if (/\/(dp|gp\/product|gp\/aw\/d)\//.test(path) && (job.step === "start" || job.step === "giftfilled")) {
+    let btn = await find(() => AMZ_BUY_NOW() || AMZ_ADD() || (amazonUnavailable() && "na"), 12000);
     if (!btn || btn === "na")
       return step("none", `Amazon: ${btn ? "this card is currently unavailable (sold out)" : "no Buy Now / Add to Cart button " + amzDiag()} – check the tab.`, true);
+    // E-gift cards (amount + recipient email) must be filled in before the buttons work
+    const gc = amzGiftForm();
+    if (gc) {
+      if (!(await amzFillGiftCard(gc))) return;            // says why in the log
+      btn = await find(() => AMZ_BUY_NOW() || AMZ_ADD(), 5000);
+      if (!btn) return step("none", "Amazon: e-gift card filled in, but no Buy Now / Add to Cart button – finish in the tab. " + amzDiag(), true);
+    }
     const buyNow = btn === AMZ_BUY_NOW();
     await step(buyNow ? "buynow" : "added", `Amazon: product page – clicking '${buyNow ? "Buy Now" : "Add to Cart"}'…`);
     btn.click();

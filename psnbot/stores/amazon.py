@@ -164,7 +164,9 @@ class Amazon(Store):
 
         avail_node = doc.css_first("#availability")
         avail = avail_node.text(strip=True).lower() if avail_node else ""
-        has_buy = bool(doc.css_first("#add-to-cart-button") or doc.css_first("#buy-now-button"))
+        # gc-buy-box-*: the buttons on e-gift card pages (amount + recipient email form)
+        has_buy = bool(doc.css_first("#add-to-cart-button") or doc.css_first("#buy-now-button")
+                       or doc.css_first("#gc-buy-box-atc") or doc.css_first("#gc-buy-box-bn"))
         if "currently unavailable" in avail or "out of stock" in avail:
             in_stock = False
         elif has_buy:

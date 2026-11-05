@@ -66,7 +66,7 @@ stores:
     max_pages: 1
 
   amazon:
-    interval_seconds: 120        # all Amazon listings; Amazon may block very frequent checks
+    interval_seconds: 30         # every Amazon listing; Amazon may block very frequent checks (raise if you get ⚠️ warnings)
     fast_interval_seconds: 30    # the fast_check card(s)
     # Amazon search is blocked from cloud servers, so the bot checks the listings below
     # (via Amazon's mobile product page, which isn't blocked). Paste any Amazon link:

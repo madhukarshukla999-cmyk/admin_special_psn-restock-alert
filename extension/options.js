@@ -6,7 +6,7 @@ const DEFAULTS = {
   stores: { gamestheshop: true, amazon: true, others: true },
   // keep in step with AMZ_WATCH_DEFAULTS in background.js
   amzWatch: false, amzWatchSec: 15, amzWatchInfo: "",
-  amzWatchList: "B093QF35KZ  ₹2000 card\nB07K6RYVJ5  ₹4000 card\nB0C1H3K2V4  PlayStation E-Gift Card",
+  amzWatchList: "B093QF35KZ  ₹2000 card\nB07K6RYVJ5  ₹4000 card\nB0C1H3K2V4  PlayStation E-Gift Card\nB07K6PVR8B  PlayStation card",
 };
 let editing = false, typing = false;
 $("version").textContent = "v" + chrome.runtime.getManifest().version + " · fast checkout";

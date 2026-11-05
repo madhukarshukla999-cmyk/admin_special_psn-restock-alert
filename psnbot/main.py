@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import html
 import logging
 import os
@@ -159,6 +160,7 @@ class Bot:
                 log.warning("Unknown store '%s' in config — skipped", sid)
                 continue
             store = REGISTRY[sid](scfg, self.filter)
+            store.on_found = functools.partial(self._found_early, store)
             if hasattr(store, "known"):
                 store.known.update(self.state.known.get(sid, {}))
             self.stores.append(store)
@@ -365,6 +367,21 @@ class Bot:
             self._apply(store, items, restocked, sold_out, full_listing=full, silent=self.state.is_new)
             await self._notify(client, restocked, sold_out)
             self.state.save()
+
+    async def _found_early(self, store, client, items: list[Item]) -> None:
+        """A store found in-stock cards partway through a check (it already holds the store's
+        lock): alert now. The full result at the end of the check sees them as already in
+        stock, so nobody is alerted twice."""
+        try:
+            restocked: dict[str, list[Item]] = {}
+            sold_out: dict[str, list[tuple[Item, float | None]]] = {}
+            self._apply(store, items, restocked, sold_out, full_listing=False, silent=self.state.is_new)
+            if restocked:
+                log.info("%s: restock found mid-check, alerting now", store.name)
+                await self._notify(client, restocked, sold_out)
+                self.state.save()
+        except Exception:  # noqa: BLE001 - an alert problem must not abort the check
+            log.exception("%s: early alert failed", store.name)
 
     async def _store_loop(self, client, store) -> None:
         stop, ev = self._stop, self._resched[store.id]

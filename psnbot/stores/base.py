@@ -13,6 +13,9 @@ class Store:
 
     id: str = ""
     name: str = ""
+    # Set by the bot: `await on_found(client, items)` for in-stock cards found partway through a
+    # check, so they're alerted right away instead of after the rest of the check (see Amazon).
+    on_found = None
 
     def __init__(self, cfg: dict, title_filter: TitleFilter):
         self.cfg = cfg or {}

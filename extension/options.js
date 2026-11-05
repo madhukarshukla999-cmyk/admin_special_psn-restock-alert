@@ -4,6 +4,9 @@ const DEFAULTS = {
   amazonUpiQr: true, upiId: "", tgQr: true, tgToken: "", tgChatId: "", browserName: "", gtsMobile: "", qrTimeoutSec: 120, qrMode: "dm", amzMobile: "", gtsPayWith: "upi", cardLast4: "", cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "", cardAutoPay: true,
   browserType: "", profileName: "", accountName: "", setupDone: false, remotePaused: false,
   stores: { gamestheshop: true, amazon: true, others: true },
+  // keep in step with AMZ_WATCH_DEFAULTS in background.js
+  amzWatch: false, amzWatchSec: 15, amzWatchInfo: "",
+  amzWatchList: "B093QF35KZ  ₹2000 card\nB07K6RYVJ5  ₹4000 card\nB0C1H3K2V4  PlayStation E-Gift Card",
 };
 let editing = false, typing = false;
 $("version").textContent = "v" + chrome.runtime.getManifest().version + " · fast checkout";
@@ -105,6 +108,9 @@ async function load() {
   $("gtsMobile").placeholder = acc && acc.mobile ? `auto: +91 ${acc.mobile}` : "auto-detected";
   $("upiId").value = s.upiId || "";
   for (const k of ["gamestheshop", "amazon", "others"]) $("st_" + k).checked = s.stores[k];
+  $("amzWatch").checked = s.amzWatch; $("amzWatchSec").value = s.amzWatchSec || 15;
+  $("amzWatchList").value = s.amzWatchList;
+  $("amzWatchInfo").textContent = s.amzWatch ? s.amzWatchInfo || "Starting…" : "";
   const group = /^-/.test(s.tgChatId || "");
   $("chatWarn").classList.toggle("hidden", !group);
   $("chatWarn").textContent = group ? "⚠ The chat ID is a group – everyone in it would see QRs and payment results. Use your own chat ID." : "";
@@ -191,6 +197,8 @@ $("save").onclick = async () => {
     cardLast4: ($("cardNumber").value.replace(/\D/g, "") || $("cardLast4").value).slice(-4), qrTimeoutSec: Math.max(30, Number($("qrTimeoutSec").value) || 120),
     gtsMobile: mobileOf($("gtsMobile").value), upiId: $("upiId").value.trim(),
     stores: { gamestheshop: $("st_gamestheshop").checked, amazon: $("st_amazon").checked, others: $("st_others").checked },
+    amzWatch: $("amzWatch").checked, amzWatchSec: Math.max(5, Number($("amzWatchSec").value) || 15),
+    amzWatchList: $("amzWatchList").value.trim(),
   });
   chrome.runtime.sendMessage({ type: "settings-changed" }).catch(() => {});
   $("save").textContent = "Saved ✓"; setTimeout(() => ($("save").textContent = "Save"), 1500);
@@ -221,7 +229,7 @@ $("cardExpiry").addEventListener("input", (e) => {       // 1227 -> 12/27 as you
   const d = e.target.value.replace(/\D/g, "").slice(0, 4);
   e.target.value = d.length > 2 ? d.slice(0, 2) + "/" + d.slice(2) : d;
 });
-for (const id of ["cardNumber", "cardExpiry", "cardName", "cardCvv", "cardLast4"]) {
+for (const id of ["cardNumber", "cardExpiry", "cardName", "cardCvv", "cardLast4", "amzWatchList", "amzWatchSec"]) {
   $(id).addEventListener("focus", () => (typing = true));
   $(id).addEventListener("blur", () => { typing = false; });
 }

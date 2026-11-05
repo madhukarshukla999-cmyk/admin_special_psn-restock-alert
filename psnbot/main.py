@@ -21,7 +21,7 @@ from . import history as hist
 from . import updater
 from .controls import Controls
 from .http import make_client
-from .models import Item, StoreError, TitleFilter
+from .models import Item, StoreError, TitleFilter, parse_denomination
 from .state import State
 from .stores import REGISTRY
 from .channels import Mailer, html_to_text, send_whatsapp
@@ -125,6 +125,7 @@ class Bot:
         self.state = State(cfg.get("state_file", "data/state.json"))
         self.users = Users(self.state, chats)
         self.filter = TitleFilter(cfg.get("title_filter", {}))
+        self.only_values = frozenset(int(v) for v in (cfg.get("only_values") or []))
         self.error_alert_after = int(cfg.get("error_alert_after_failures", 5))
         self.store_timeout = float(cfg.get("store_timeout_seconds", 120))
         self.notify_oos = bool(cfg.get("notify_out_of_stock", True))
@@ -161,12 +162,23 @@ class Bot:
                 continue
             store = REGISTRY[sid](scfg, self.filter)
             store.on_found = functools.partial(self._found_early, store)
+            store.only_values = self.only_values
             if hasattr(store, "known"):
                 store.known.update(self.state.known.get(sid, {}))
             self.stores.append(store)
         if not self.stores:
             raise SystemExit("No stores enabled in config")
         self.names = {s.id: s.name for s in self.stores}
+        if self.only_values:
+            # forget saved cards with a value that's no longer tracked (so /status doesn't keep showing them)
+            gone = [k for k, r in self.state.items.items()
+                    if (d := parse_denomination(r.get("title", "")) or (int(r["mrp"]) if r.get("mrp") else None))
+                    and d not in self.only_values]
+            for k in gone:
+                self.state.items.pop(k)
+            if gone:
+                log.info("Card values %s only: stopped tracking %d other card(s)",
+                         ", ".join(f"₹{v}" for v in sorted(self.only_values)), len(gone))
         self._locks = {s.id: asyncio.Lock() for s in self.stores}
         self.warp = None
         self.warp_stores = warpmod.stores() & set(self.names) if warpmod.enabled() else set()
@@ -452,6 +464,7 @@ class Bot:
         now = time.time()
         seen_keys = set()
         events = self.state.history
+        items = [i for i in items if store.wanted(i)]      # config `only_values`
         for it in items:
             seen_keys.add(it.key)
             prev = self.state.items.get(it.key)

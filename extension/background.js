@@ -119,6 +119,13 @@ async function handleAlert(data) {
   if (!storeOn && !data.test) { await log(`Skipped ${data.store_name} (turned off)`); return; }
 
   let items = (data.items || []).filter((i) => safeUrl(i.url));
+  const vals = await allowedValues();
+  if (vals) {                                        // Options → "Card values": only those (unknown value = keep)
+    const skip = items.filter((i) => { const v = i.value || amzValue(i.title); return v && !vals.has(v); });
+    if (skip.length) await log(`${data.store_name}: ignored ${skip.map((i) => "₹" + (i.value || amzValue(i.title))).join(", ")} (not in your card values)`);
+    items = items.filter((i) => !skip.includes(i));
+    if (!items.length) return;
+  }
   if (s.maxPrice > 0) items = items.filter((i) => !i.price || i.price <= s.maxPrice);
   if (!items.length) { await log(`Skipped ${data.store_name}: no allowed link / over price limit`); return; }
 
@@ -578,6 +585,14 @@ async function amzCheck(asin) {
   return { inStock, title };
 }
 
+// Options → "Card values" (e.g. "1000, 2000, 3000, 4000, 5000"): a Set, or null = every value
+const DEFAULT_VALUES = "1000, 2000, 3000, 4000, 5000";     // keep in step with options.js
+async function allowedValues() {
+  const { onlyValues } = await chrome.storage.local.get({ onlyValues: DEFAULT_VALUES });
+  const set = new Set(String(onlyValues || "").split(/[^\d]+/).filter(Boolean).map(Number).filter((v) => v >= 100));
+  return set.size ? set : null;
+}
+
 // Cards opened recently: "store:id" -> { ts, by: "local" | "bot" } (session storage, so it
 // survives the worker restarting). Check + mark run one alert at a time, so two alerts for
 // the same card arriving together can't both open it.
@@ -749,7 +764,7 @@ async function gtsWatchRun() {
     } else if (Date.now() < gtsPauseUntil) {
       await gtsStatus(`⚠ GamesTheShop asked to slow down – checking again at ${new Date(gtsPauseUntil).toLocaleTimeString()}`);
     } else {
-      const rows = await gtsList();
+      let rows = await gtsList();
       if (rows === "limited") {
         gtsPauseUntil = Date.now() + 60 * 1000;
         await log("GamesTheShop check: too many requests (HTTP 429) – pausing 1 min. If it keeps happening, use a longer interval in Options.");
@@ -757,6 +772,8 @@ async function gtsWatchRun() {
         if (++gtsFails >= 5) await gtsStatus("⚠ Couldn't read GamesTheShop's stock list");
       } else {
         gtsFails = 0;
+        const vals = await allowedValues();          // only the card values you want (no requests for the rest)
+        if (vals) rows = rows.filter((r) => { const v = amzValue(r.name); return !v || vals.has(v); });
         const { gtsLast = {} } = await chrome.storage.session.get("gtsLast");
         const now = Date.now();
         // live-check cards the list calls in stock: straight away when the list just changed,

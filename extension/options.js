@@ -7,6 +7,7 @@ const DEFAULTS = {
   // keep in step with AMZ_WATCH_DEFAULTS in background.js
   amzWatch: false, amzWatchSec: 15, amzWatchInfo: "", amzGiftEmail: "",
   gtsWatch: false, gtsWatchSec: 1, gtsWatchInfo: "",                    // keep in step with GTS_WATCH_DEFAULTS
+  onlyValues: "1000, 2000, 3000, 4000, 5000",                           // keep in step with DEFAULT_VALUES
   amzWatchList: "B093QF35KZ  ₹2000 card\nB07K6RYVJ5  ₹4000 card\nB0C1H3K2V4  PlayStation E-Gift Card\nB07K6PVR8B  PlayStation card",
 };
 let editing = false, typing = false;
@@ -113,6 +114,7 @@ async function load() {
   $("amzWatchList").value = s.amzWatchList; $("amzGiftEmail").value = s.amzGiftEmail || "";
   $("amzWatchInfo").textContent = s.amzWatch ? s.amzWatchInfo || "Starting…" : "";
   $("gtsWatch").checked = s.gtsWatch; $("gtsWatchSec").value = s.gtsWatchSec || 1;
+  $("onlyValues").value = s.onlyValues;
   $("gtsWatchInfo").textContent = s.gtsWatch ? s.gtsWatchInfo || "Starting…" : "";
   const group = /^-/.test(s.tgChatId || "");
   $("chatWarn").classList.toggle("hidden", !group);
@@ -212,6 +214,8 @@ $("save").onclick = async () => {
     amzWatch: $("amzWatch").checked, amzWatchSec: Math.max(5, Number($("amzWatchSec").value) || 15),
     amzWatchList: $("amzWatchList").value.trim(),
     gtsWatch: $("gtsWatch").checked, gtsWatchSec: Math.max(1, Number($("gtsWatchSec").value) || 1),
+    // tidy "1k,2000 ;3000" -> "2000, 3000" (numbers of 100+ only)
+    onlyValues: [...new Set($("onlyValues").value.split(/[^\d]+/).filter(Boolean).map(Number).filter((v) => v >= 100))].join(", "),
   });
   chrome.runtime.sendMessage({ type: "settings-changed" }).catch(() => {});
   $("save").textContent = "Saved ✓"; setTimeout(() => ($("save").textContent = "Save"), 1500);
@@ -242,7 +246,7 @@ $("cardExpiry").addEventListener("input", (e) => {       // 1227 -> 12/27 as you
   const d = e.target.value.replace(/\D/g, "").slice(0, 4);
   e.target.value = d.length > 2 ? d.slice(0, 2) + "/" + d.slice(2) : d;
 });
-for (const id of ["cardNumber", "cardExpiry", "cardName", "cardCvv", "cardLast4", "amzWatchList", "amzWatchSec", "amzGiftEmail", "gtsWatchSec"]) {
+for (const id of ["cardNumber", "cardExpiry", "cardName", "cardCvv", "cardLast4", "amzWatchList", "amzWatchSec", "amzGiftEmail", "gtsWatchSec", "onlyValues"]) {
   $(id).addEventListener("focus", () => (typing = true));
   $(id).addEventListener("blur", () => { typing = false; });
 }

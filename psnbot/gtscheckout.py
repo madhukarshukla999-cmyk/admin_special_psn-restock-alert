@@ -88,7 +88,6 @@ def _json(r) -> dict:
         raise GtsError(f"unexpected response (HTTP {r.status_code})")
 
 
-# -- login (mobile + OTP) --------------------------------------------------------
 def _detail(r) -> str:
     """A short, safe snippet of the server's reply, for error messages."""
     try:
@@ -98,6 +97,7 @@ def _detail(r) -> str:
         return (r.text or "")[:160]
 
 
+# -- login (mobile + OTP) --------------------------------------------------------
 async def request_otp(client, mobile: str) -> None:
     r = await _post(client, "/auth/sms/request", json={"mobile_number": mobile})
     if r.status_code != 200:
@@ -130,6 +130,42 @@ async def profile(client, acc: dict) -> dict:
     return (_json(r).get("data") or {})
 
 
+async def _variant(client, product_id: str, variant_id: str) -> tuple[dict, dict]:
+    """(variant, product) from the public product detail, to fill the cart exactly like the site."""
+    r = await _get(client, f"/products/{product_id}/")
+    if r.status_code != 200:
+        raise GtsError(f"couldn't read the product (HTTP {r.status_code}: {_detail(r)})")
+    d = _json(r).get("data") or {}
+    variants = d.get("variants") or []
+    v = next((x for x in variants if str(x.get("id")) == str(variant_id)), variants[0] if variants else {})
+    return v, d
+
+
+def _cart_body(v: dict, product_id: str, variant_id: str, item) -> dict:
+    """Mirror the website's buy-now cart payload, from live variant data (falling back to the Item)."""
+    prod = v.get("product") or {}
+    reg = v.get("regular_price") or getattr(item, "mrp", None) or v.get("sale_price") or getattr(item, "price", None)
+    sale = v.get("sale_price") or getattr(item, "price", None) or reg
+    cat = (prod.get("category") or {}).get("name") or v.get("category") or "Digital"
+    plat = (prod.get("platform") or {}).get("name") or v.get("platform") or "PSN"
+    edition = (v.get("edition") or prod.get("edition") or {})
+    edition = edition.get("name") if isinstance(edition, dict) else (edition or "Unknown")
+    is_digital = prod.get("is_digital")
+    if is_digital is None:
+        is_digital = True if v.get("condition") == "digital" or getattr(item, "store", "") == "gamestheshop" else False
+    return {
+        "productId": variant_id, "qty": 1,
+        "name": v.get("name") or v.get("product_name") or getattr(item, "title", ""),
+        "regular_price": float(reg) if reg else None, "sale_price": float(sale) if sale else None,
+        "image": v.get("thumbnail") or (v.get("media") or [{}])[0].get("url"),
+        "is_digital": bool(is_digital), "parentProductId": product_id,
+        "is_cod": bool(prod.get("is_cod_applicable", False)),
+        "category": cat, "platform": plat, "edition": edition or "Unknown",
+        "release_date": v.get("release_date") or prod.get("release_date"),
+        "shipping_date": v.get("shipping_date"), "is_pre_order": bool(v.get("is_pre_order") or prod.get("is_pre_order", False)),
+    }
+
+
 # -- checkout (cart -> order -> Paytm token) -------------------------------------
 async def checkout(client, state, acc: dict, item) -> dict:
     """Run one buy-now checkout for `item` (a bot Item for a GamesTheShop card).
@@ -141,15 +177,16 @@ async def checkout(client, state, acc: dict, item) -> dict:
     if not product_id:
         raise GtsError("missing product id for this card")
 
+    # live product details, so the cart matches what the website sends (prices, category, etc.)
+    v, _d = await _variant(client, product_id, item.item_id)
+
     # 1) buy-now cart
-    cart_body = {"productId": item.item_id, "qty": 1, "name": item.title,
-                 "regular_price": item.mrp or item.price, "sale_price": item.price or item.mrp,
-                 "is_digital": True, "parentProductId": product_id, "is_cod": False}
+    cart_body = _cart_body(v, product_id, item.item_id, item)
     r = await _post(client, "/cart/", params={"userId": acc["user_id"], "buyNow": "true"}, json=cart_body, headers=H)
     if r.status_code in (401, 403):
         raise GtsError("login expired – add this account again with /gtsbuy add")
     if r.status_code not in (200, 201):
-        raise GtsError(f"add to cart failed (HTTP {r.status_code})")
+        raise GtsError(f"add to cart failed (HTTP {r.status_code}: {_detail(r)})")
 
     # 2) create order
     order_body = {"payment_type": "PREPAID", "items": [{"variant_id": item.item_id, "qty": 1}]}

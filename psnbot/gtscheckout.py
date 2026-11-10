@@ -25,6 +25,14 @@ import httpx
 log = logging.getLogger(__name__)
 
 API = "https://green-api.gamestheshop.com/storefront"
+# The storefront API only answers requests that look like they come from the shop's own site.
+# (The stock checker sends the same Origin/Referer; without them the API rejects the call.)
+SITE = {
+    "Origin": "https://www.gamestheshop.com",
+    "Referer": "https://www.gamestheshop.com/",
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"),
+}
 
 
 class GtsError(Exception):
@@ -43,7 +51,7 @@ async def _post(client, path, json=None, params=None, headers=None, expect=(200,
     try:
         r = await client.post(f"{API}{path}", json=json, params=params,
                               headers={"Content-Type": "application/json", "Accept": "application/json, text/plain, */*",
-                                       **(headers or {})}, timeout=20)
+                                       **SITE, **(headers or {})}, timeout=20)
     except httpx.HTTPError as e:
         raise GtsError(f"request failed: {e!r}")
     return r
@@ -51,7 +59,7 @@ async def _post(client, path, json=None, params=None, headers=None, expect=(200,
 
 async def _get(client, path, headers=None):
     try:
-        r = await client.get(f"{API}{path}", headers={"Accept": "application/json, text/plain, */*", **(headers or {})}, timeout=20)
+        r = await client.get(f"{API}{path}", headers={"Accept": "application/json, text/plain, */*", **SITE, **(headers or {})}, timeout=20)
     except httpx.HTTPError as e:
         raise GtsError(f"request failed: {e!r}")
     return r
@@ -65,10 +73,19 @@ def _json(r) -> dict:
 
 
 # -- login (mobile + OTP) --------------------------------------------------------
+def _detail(r) -> str:
+    """A short, safe snippet of the server's reply, for error messages."""
+    try:
+        d = r.json()
+        return str(d.get("message") or d.get("detail") or d.get("error") or d)[:160]
+    except ValueError:
+        return (r.text or "")[:160]
+
+
 async def request_otp(client, mobile: str) -> None:
     r = await _post(client, "/auth/sms/request", json={"mobile_number": mobile})
     if r.status_code != 200:
-        raise GtsError(f"couldn't send the OTP (HTTP {r.status_code})")
+        raise GtsError(f"couldn't send the OTP (HTTP {r.status_code}: {_detail(r)})")
 
 
 async def verify_otp(client, state, label: str, mobile: str, otp: str) -> dict:

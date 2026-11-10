@@ -63,25 +63,34 @@ def _proxy() -> str | None:
     return os.environ.get("GTS_PROXY") or None
 
 
-async def _request(method, path, *, json=None, params=None, headers=None):
+def _session():
+    """A curl_cffi session (Chrome fingerprint). Reusing one across a checkout keeps the TLS
+    connection open, so the 2nd–5th calls skip the handshake (the slow part on a US->India path)."""
     if AsyncSession is None:
         raise GtsError("curl_cffi isn't installed (pip install curl_cffi)")
-    h = {"Accept": "application/json, text/plain, */*", **SITE, **(headers or {})}
     kw = {"proxy": _proxy()} if _proxy() else {}
+    return AsyncSession(impersonate="chrome", **kw)
+
+
+async def _request(method, path, *, json=None, params=None, headers=None, session=None):
+    h = {"Accept": "application/json, text/plain, */*", **SITE, **(headers or {})}
     try:
-        async with AsyncSession(impersonate="chrome", **kw) as s:
-            r = await s.request(method, f"{API}{path}", json=json, params=params, headers=h, timeout=20)
+        if session is not None:                       # reuse the open connection
+            return await session.request(method, f"{API}{path}", json=json, params=params, headers=h, timeout=20)
+        async with _session() as s:                   # one-off call
+            return await s.request(method, f"{API}{path}", json=json, params=params, headers=h, timeout=20)
+    except GtsError:
+        raise
     except Exception as e:  # noqa: BLE001 - network/curl errors surface as a clean message
         raise GtsError(f"request failed: {e!r}")
-    return r
 
 
-async def _post(client, path, json=None, params=None, headers=None, expect=(200, 201)):
-    return await _request("POST", path, json=json, params=params, headers=headers)
+async def _post(client, path, json=None, params=None, headers=None, expect=(200, 201), session=None):
+    return await _request("POST", path, json=json, params=params, headers=headers, session=session)
 
 
-async def _get(client, path, headers=None):
-    return await _request("GET", path, headers=headers)
+async def _get(client, path, headers=None, session=None):
+    return await _request("GET", path, headers=headers, session=session)
 
 
 def _json(r) -> dict:
@@ -108,16 +117,21 @@ async def request_otp(client, mobile: str) -> None:
 
 
 async def verify_otp(client, state, label: str, mobile: str, otp: str) -> dict:
-    r = await _post(client, "/auth/sms/verify", json={"mobile_number": mobile, "otp": otp})
+    async with _session() as session:
+        return await _verify_otp(session, state, label, mobile, otp)
+
+
+async def _verify_otp(session, state, label: str, mobile: str, otp: str) -> dict:
+    r = await _post(None, "/auth/sms/verify", json={"mobile_number": mobile, "otp": otp}, session=session)
     data = _json(r)
     access, refresh = data.get("access"), data.get("refresh")
     if r.status_code != 200 or not access:
         raise GtsError(data.get("message") or f"wrong or expired OTP (HTTP {r.status_code})")
     acc = accounts(state).setdefault(label, {})
     acc.update(mobile=mobile, access=access, refresh=refresh, pending_otp=False, added=time.time())
-    # fill in user_id (needed for the cart call)
+    # fill in user_id (needed for the cart call), reusing the same connection as the verify call
     try:
-        prof = _json(await _get(client, "/customer/profile", headers=_auth(acc))).get("data") or {}
+        prof = _json(await _get(client, "/customer/profile", headers=_auth(acc), session=session)).get("data") or {}
         acc["user_id"] = str(prof.get("user_id") or prof.get("id") or "")
         acc["addresses"] = prof.get("addresses") if isinstance(prof.get("addresses"), list) else acc.get("addresses")
     except GtsError:
@@ -133,12 +147,35 @@ async def profile(client, acc: dict) -> dict:
     return (_json(r).get("data") or {})
 
 
-async def _variant(client, product_id: str, variant_id: str) -> tuple[dict, dict]:
-    """(variant, product) from the public product detail, to fill the cart exactly like the site."""
-    r = await _get(client, f"/products/{product_id}/")
+# card details don't change, so cache them: a multi-card restock across several accounts then
+# fetches each product only once (product_id -> (fetched_at, data))
+_VCACHE: dict[str, tuple[float, dict]] = {}
+_VCACHE_TTL = 3600
+
+
+async def prefetch(product_id: str) -> None:
+    """Warm the details cache for a card (call when it's first seen, so buying skips this request)."""
+    try:
+        await _product(product_id)
+    except GtsError:
+        pass
+
+
+async def _product(product_id: str, session=None) -> dict:
+    hit = _VCACHE.get(product_id)
+    if hit and time.time() - hit[0] < _VCACHE_TTL:
+        return hit[1]
+    r = await _get(None, f"/products/{product_id}/", session=session)
     if r.status_code != 200:
         raise GtsError(f"couldn't read the product (HTTP {r.status_code}: {_detail(r)})")
     d = _json(r).get("data") or {}
+    _VCACHE[product_id] = (time.time(), d)
+    return d
+
+
+async def _variant(client, product_id: str, variant_id: str, session=None) -> tuple[dict, dict]:
+    """(variant, product) from the public product detail, to fill the cart exactly like the site."""
+    d = await _product(product_id, session=session)
     variants = d.get("variants") or []
     v = next((x for x in variants if str(x.get("id")) == str(variant_id)), variants[0] if variants else {})
     return v, d
@@ -194,31 +231,32 @@ async def checkout(client, state, acc: dict, item) -> dict:
     if not product_id:
         raise GtsError("missing product id for this card")
 
-    # live product details, so the cart matches what the website sends (prices, category, etc.)
-    v, _d = await _variant(client, product_id, item.item_id)
+    async with _session() as s:                       # one open connection for all the calls below
+        # card details (cached), so the cart matches what the website sends (prices, category, etc.)
+        v, _d = await _variant(client, product_id, item.item_id, session=s)
 
-    # 1) buy-now cart
-    cart_body = _cart_body(v, product_id, item.item_id, item)
-    r = await _post(client, "/cart/", params={"userId": acc["user_id"], "buyNow": "true"}, json=cart_body, headers=H)
-    if r.status_code in (401, 403):
-        raise GtsError("login expired – add this account again with /gtsbuy add")
-    if r.status_code not in (200, 201):
-        raise GtsError(f"add to cart failed (HTTP {r.status_code}: {_detail(r)})")
+        # 1) buy-now cart
+        cart_body = _cart_body(v, product_id, item.item_id, item)
+        r = await _post(client, "/cart/", params={"userId": acc["user_id"], "buyNow": "true"}, json=cart_body, headers=H, session=s)
+        if r.status_code in (401, 403):
+            raise GtsError("login expired – add this account again with /gtsbuy add")
+        if r.status_code not in (200, 201):
+            raise GtsError(f"add to cart failed (HTTP {r.status_code}: {_detail(r)})")
 
-    # 2) create order
-    order_body = {"payment_type": "PREPAID", "items": [{"variant_id": item.item_id, "qty": 1}]}
-    addr = (acc.get("addresses") or [None])[0] if isinstance(acc.get("addresses"), list) else acc.get("addresses")
-    if addr:
-        order_body["shipping_address"] = order_body["billing_address"] = addr
-    r = await _post(client, "/orders/create", json=order_body, headers=H)
-    data = _json(r).get("data") or {}
-    order_id = data.get("order_id") or data.get("checkout_group_id")
-    if r.status_code not in (200, 201) or not order_id:
-        raise GtsError(_json(r).get("message") or f"couldn't create the order (HTTP {r.status_code})")
+        # 2) create order
+        order_body = {"payment_type": "PREPAID", "items": [{"variant_id": item.item_id, "qty": 1}]}
+        addr = (acc.get("addresses") or [None])[0] if isinstance(acc.get("addresses"), list) else acc.get("addresses")
+        if addr:
+            order_body["shipping_address"] = order_body["billing_address"] = addr
+        r = await _post(client, "/orders/create", json=order_body, headers=H, session=s)
+        data = _json(r).get("data") or {}
+        order_id = data.get("order_id") or data.get("checkout_group_id")
+        if r.status_code not in (200, 201) or not order_id:
+            raise GtsError(_json(r).get("message") or f"couldn't create the order (HTTP {r.status_code})")
 
-    # 3) checkout -> Paytm token
-    r = await _post(client, "/orders/checkout", json={"checkout_group_id": order_id}, headers=H)
-    pay = _json(r).get("data") or {}
+        # 3) checkout -> Paytm token
+        r = await _post(client, "/orders/checkout", json={"checkout_group_id": order_id}, headers=H, session=s)
+        pay = _json(r).get("data") or {}
     if r.status_code not in (200, 201) or not pay.get("txnToken"):
         raise GtsError(_json(r).get("message") or f"couldn't start the payment (HTTP {r.status_code})")
     return {"order_id": order_id, "paytmOrderId": pay.get("paytmOrderId"), "txnToken": pay.get("txnToken"),
@@ -286,15 +324,18 @@ async def send_photo(client, token: str, chat_id: str, png: bytes, caption: str)
         return None
 
 
-async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: list[str]) -> str:
-    """Send the order's UPI QR (or the UPI link if no QR library) to the owner. Returns a status line."""
+async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: list[str], secs: float | None = None) -> str:
+    """Send the order's UPI QR (or the UPI link if no QR library) to the owner. Returns a status line.
+    `secs` = how long the order took, shown in the caption so we can see the real speed."""
     import html as _html
     link = await paytm_upi_link(pay)
     amount = pay.get("amount") or "?"
     minutes = QR_MINUTES
+    speed = f"⚡ Ordered in {secs:.1f}s\n" if secs is not None else ""
     caption = (f"💳 <b>GamesTheShop</b> · {_html.escape(title)}\n"
                f"👤 Account: {_html.escape(label)}\n"
-               f"💰 ₹{_html.escape(str(amount))} · 🧾 {_html.escape(str(pay.get('paytmOrderId', ''))[:40])}\n\n"
+               f"💰 ₹{_html.escape(str(amount))} · 🧾 {_html.escape(str(pay.get('paytmOrderId', ''))[:40])}\n"
+               f"{speed}\n"
                f"⏳ Pay within ~{minutes} min. Scan with any UPI app and enter your PIN.\n"
                "Same phone: save the image → UPI app → Scan QR → gallery.")
     png = qr_png(link)
@@ -318,10 +359,10 @@ def auto_on(state) -> bool:
     return bool(state.settings.get("gts_auto"))
 
 
-async def _pay_safe(bot, client, label, title, pay, chat_ids):
+async def _pay_safe(bot, client, label, title, pay, chat_ids, secs=None):
     import html as _html
     try:
-        await pay_to_dm(bot, client, label, title, pay, chat_ids)
+        await pay_to_dm(bot, client, label, title, pay, chat_ids, secs=secs)
     except GtsError as e:
         await bot.tg.send(client, f"⚠️ GamesTheShop · {_html.escape(label)} · {_html.escape(title)}: order placed, "
                                   f"but no QR – {_html.escape(str(e))}", chat_ids=chat_ids)
@@ -353,6 +394,7 @@ async def auto_checkout(bot, client, items) -> None:
             if time.time() - recent.get(key, 0) < COOLDOWN:
                 continue                                          # ordered this card a moment ago
             recent[key] = time.time()
+            c0 = time.time()
             try:
                 pay = await checkout(client, state, acc, it)
             except GtsError as e:
@@ -361,8 +403,9 @@ async def auto_checkout(bot, client, items) -> None:
                 if "login expired" in str(e):
                     return                                        # no point trying the other cards
                 continue
-            log.info("GamesTheShop: %s ordered %s (%s)", label, it.title, pay.get("paytmOrderId"))
-            task = asyncio.create_task(_pay_safe(bot, client, label, it.title, pay, owners))
+            secs = time.time() - c0
+            log.info("GamesTheShop: %s ordered %s in %.1fs (%s)", label, it.title, secs, pay.get("paytmOrderId"))
+            task = asyncio.create_task(_pay_safe(bot, client, label, it.title, pay, owners, secs=secs))
             bot._bg.add(task)
             task.add_done_callback(bot._bg.discard)
 

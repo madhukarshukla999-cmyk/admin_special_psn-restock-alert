@@ -141,28 +141,42 @@ async def _variant(client, product_id: str, variant_id: str) -> tuple[dict, dict
     return v, d
 
 
+def _as_str(*candidates) -> str | None:
+    """First candidate as a plain string: a dict becomes its 'name', others str()'d. The API
+    rejects objects ('category must be a string'), so these must never be dicts."""
+    for c in candidates:
+        if c is None or c == "":
+            continue
+        if isinstance(c, dict):
+            n = c.get("name")
+            if n:
+                return str(n)
+            continue
+        return str(c)
+    return None
+
+
 def _cart_body(v: dict, product_id: str, variant_id: str, item) -> dict:
     """Mirror the website's buy-now cart payload, from live variant data (falling back to the Item)."""
     prod = v.get("product") or {}
     reg = v.get("regular_price") or getattr(item, "mrp", None) or v.get("sale_price") or getattr(item, "price", None)
     sale = v.get("sale_price") or getattr(item, "price", None) or reg
-    cat = (prod.get("category") or {}).get("name") or v.get("category") or "Digital"
-    plat = (prod.get("platform") or {}).get("name") or v.get("platform") or "PSN"
-    edition = (v.get("edition") or prod.get("edition") or {})
-    edition = edition.get("name") if isinstance(edition, dict) else (edition or "Unknown")
     is_digital = prod.get("is_digital")
     if is_digital is None:
-        is_digital = True if v.get("condition") == "digital" or getattr(item, "store", "") == "gamestheshop" else False
+        is_digital = v.get("condition") == "digital" or getattr(item, "store", "") == "gamestheshop"
     return {
         "productId": variant_id, "qty": 1,
-        "name": v.get("name") or v.get("product_name") or getattr(item, "title", ""),
+        "name": _as_str(v.get("name"), v.get("product_name"), getattr(item, "title", "")) or "",
         "regular_price": float(reg) if reg else None, "sale_price": float(sale) if sale else None,
-        "image": v.get("thumbnail") or (v.get("media") or [{}])[0].get("url"),
+        "image": _as_str(v.get("thumbnail"), (v.get("media") or [{}])[0].get("url")),
         "is_digital": bool(is_digital), "parentProductId": product_id,
         "is_cod": bool(prod.get("is_cod_applicable", False)),
-        "category": cat, "platform": plat, "edition": edition or "Unknown",
+        "category": _as_str(prod.get("category"), v.get("category")) or "Digital",
+        "platform": _as_str(prod.get("platform"), v.get("platform")) or "PSN",
+        "edition": _as_str(v.get("edition"), prod.get("edition")) or "Unknown",
         "release_date": v.get("release_date") or prod.get("release_date"),
-        "shipping_date": v.get("shipping_date"), "is_pre_order": bool(v.get("is_pre_order") or prod.get("is_pre_order", False)),
+        "shipping_date": v.get("shipping_date"),
+        "is_pre_order": bool(v.get("is_pre_order") or prod.get("is_pre_order", False)),
     }
 
 

@@ -20,7 +20,14 @@ from __future__ import annotations
 import logging
 import time
 
-import httpx
+import os
+
+# GamesTheShop's login/checkout endpoints sit behind Cloudflare, which 403s normal HTTP clients
+# from cloud IPs. curl_cffi sends a real Chrome TLS fingerprint (same approach as the Blinkit store).
+try:
+    from curl_cffi.requests import AsyncSession
+except ImportError:  # pragma: no cover
+    AsyncSession = None
 
 log = logging.getLogger(__name__)
 
@@ -47,22 +54,31 @@ def _auth(acc: dict) -> dict:
     return {"Authorization": f"Bearer {acc['access']}", "Accept": "application/json, text/plain, */*"}
 
 
-async def _post(client, path, json=None, params=None, headers=None, expect=(200, 201)):
+def _proxy() -> str | None:
+    """Optional proxy for the checkout calls, e.g. the WARP tunnel if Cloudflare still blocks the IP:
+    GTS_PROXY=socks5://127.0.0.1:40000 (or reuse BLINKIT_PROXY)."""
+    return os.environ.get("GTS_PROXY") or None
+
+
+async def _request(method, path, *, json=None, params=None, headers=None):
+    if AsyncSession is None:
+        raise GtsError("curl_cffi isn't installed (pip install curl_cffi)")
+    h = {"Accept": "application/json, text/plain, */*", **SITE, **(headers or {})}
+    kw = {"proxy": _proxy()} if _proxy() else {}
     try:
-        r = await client.post(f"{API}{path}", json=json, params=params,
-                              headers={"Content-Type": "application/json", "Accept": "application/json, text/plain, */*",
-                                       **SITE, **(headers or {})}, timeout=20)
-    except httpx.HTTPError as e:
+        async with AsyncSession(impersonate="chrome", **kw) as s:
+            r = await s.request(method, f"{API}{path}", json=json, params=params, headers=h, timeout=20)
+    except Exception as e:  # noqa: BLE001 - network/curl errors surface as a clean message
         raise GtsError(f"request failed: {e!r}")
     return r
+
+
+async def _post(client, path, json=None, params=None, headers=None, expect=(200, 201)):
+    return await _request("POST", path, json=json, params=params, headers=headers)
 
 
 async def _get(client, path, headers=None):
-    try:
-        r = await client.get(f"{API}{path}", headers={"Accept": "application/json, text/plain, */*", **SITE, **(headers or {})}, timeout=20)
-    except httpx.HTTPError as e:
-        raise GtsError(f"request failed: {e!r}")
-    return r
+    return await _request("GET", path, headers=headers)
 
 
 def _json(r) -> dict:

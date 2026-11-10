@@ -1249,10 +1249,14 @@ class Controls:
                 res = await gc.checkout(client, self.bot.state, accts[label], item)
             except gc.GtsError as e:
                 return f"❌ {html.escape(str(e))}"
-            return (f"✅ Checkout works for <b>{html.escape(label)}</b>.\n"
-                    f"Order {html.escape(str(res['order_id']))[:12]}…, amount ₹{res.get('amount')}.\n"
-                    "A real (unpaid) order was placed and will expire if you don't pay. "
-                    "Paytm payment delivery to your DM is the next step.")
+            head = (f"✅ Checkout works for <b>{html.escape(label)}</b>.\n"
+                    f"Order {html.escape(str(res['order_id']))[:12]}…, amount ₹{res.get('amount')}.\n")
+            try:
+                how = await gc.pay_to_dm(self.bot, client, label, "test order", res, [str(cid)])
+            except gc.GtsError as e:
+                return head + f"❌ Payment step: {html.escape(str(e))}"
+            return (head + f"📲 {how}. <b>This is a real order:</b> only scan it if you want to buy. "
+                    "Unpaid, it expires by itself.")
 
         return ("🛒 <b>GamesTheShop auto-checkout</b> (owner)\n\n"
                 f"{acc_list()}\n\n"

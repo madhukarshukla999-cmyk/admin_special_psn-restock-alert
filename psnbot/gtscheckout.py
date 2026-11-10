@@ -220,3 +220,91 @@ async def checkout(client, state, acc: dict, item) -> dict:
         raise GtsError(_json(r).get("message") or f"couldn't start the payment (HTTP {r.status_code})")
     return {"order_id": order_id, "paytmOrderId": pay.get("paytmOrderId"), "txnToken": pay.get("txnToken"),
             "amount": pay.get("amount") or data.get("grand_total"), "mid": pay.get("mid")}
+
+
+# -- Paytm: token -> UPI payment link -> QR photo in the owner's DM -------------------------
+# Paytm's documented "Process Transaction" API with paymentMode UPI_INTENT returns a UPI deep link
+# (upi://pay?...) for the order, which is exactly what a UPI QR encodes. No browser needed.
+PAYTM_HOSTS = ("https://secure.paytmpayments.com", "https://securegw.paytm.in")
+
+
+async def paytm_upi_link(pay: dict) -> str:
+    """UPI deep link for the GamesTheShop order's Paytm token. Raises GtsError with Paytm's reason."""
+    if AsyncSession is None:
+        raise GtsError("curl_cffi isn't installed (pip install curl_cffi)")
+    mid, oid, tok = pay.get("mid"), pay.get("paytmOrderId"), pay.get("txnToken")
+    if not (mid and oid and tok):
+        raise GtsError("checkout didn't return a Paytm token")
+    body = {"head": {"channelId": "WAP", "txnToken": tok},
+            "body": {"requestType": "NATIVE", "mid": mid, "orderId": oid, "paymentMode": "UPI_INTENT"}}
+    last = "no reply"
+    kw = {"proxy": _proxy()} if _proxy() else {}
+    for host in PAYTM_HOSTS:
+        try:
+            async with AsyncSession(impersonate="chrome", **kw) as s:
+                r = await s.post(f"{host}/theia/api/v1/processTransaction", params={"mid": mid, "orderId": oid},
+                                 json=body, headers={"Content-Type": "application/json"}, timeout=20)
+            d = r.json()
+        except Exception as e:  # noqa: BLE001
+            last = f"{host}: {e!r}"
+            continue
+        b = d.get("body") or {}
+        link = (b.get("deepLinkInfo") or {}).get("deepLink") or b.get("deepLink")
+        if link and str(link).startswith("upi:"):
+            return str(link)
+        info = b.get("resultInfo") or {}
+        txn = b.get("txnInfo") or {}
+        last = (txn.get("RESPMSG") or info.get("resultMsg") or str(d)[:160])
+    raise GtsError(f"Paytm didn't give a UPI link: {last}")
+
+
+def qr_png(data: str) -> bytes | None:
+    """PNG of a QR code for `data` (needs the small pure-Python 'segno' package)."""
+    try:
+        import io
+        import segno
+    except ImportError:
+        return None
+    buf = io.BytesIO()
+    segno.make(data, error="m").save(buf, kind="png", scale=10, border=4)
+    return buf.getvalue()
+
+
+async def send_photo(client, token: str, chat_id: str, png: bytes, caption: str) -> int | None:
+    """Telegram sendPhoto (multipart). Returns the message id."""
+    try:
+        r = await client.post(f"https://api.telegram.org/bot{token}/sendPhoto",
+                              data={"chat_id": chat_id, "caption": caption[:1024], "parse_mode": "HTML"},
+                              files={"photo": ("qr.png", png, "image/png")}, timeout=30)
+        j = r.json()
+        return (j.get("result") or {}).get("message_id") if j.get("ok") else None
+    except Exception as e:  # noqa: BLE001
+        log.warning("sendPhoto failed: %r", e)
+        return None
+
+
+async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: list[str]) -> str:
+    """Send the order's UPI QR (or the UPI link if no QR library) to the owner. Returns a status line."""
+    import html as _html
+    link = await paytm_upi_link(pay)
+    amount = pay.get("amount") or "?"
+    minutes = 15                                   # Paytm txnToken lifetime
+    caption = (f"💳 <b>GamesTheShop</b> · {_html.escape(title)}\n"
+               f"👤 Account: {_html.escape(label)}\n"
+               f"💰 ₹{_html.escape(str(amount))} · 🧾 {_html.escape(str(pay.get('paytmOrderId', ''))[:40])}\n\n"
+               f"⏳ Pay within ~{minutes} min. Scan with any UPI app and enter your PIN.\n"
+               "Same phone: save the image → UPI app → Scan QR → gallery.")
+    png = qr_png(link)
+    sent = []
+    for cid in chat_ids:
+        mid = await send_photo(client, bot.tg.token, cid, png, caption) if png else None
+        if mid:
+            sent.append((cid, mid))
+        else:                                       # no QR library / photo failed: send the link as text
+            await bot.tg.send(client, caption.split("\n\n")[0] + "\n\nUPI payment link (copy into your UPI app):\n"
+                              f"<code>{_html.escape(link)}</code>", chat_ids=[cid])
+    for cid, mid in sent:                          # delete the QR once it can't be paid any more
+        async def drop(cid=cid, mid=mid):
+            await bot.tg.api(client, "deleteMessage", {"chat_id": cid, "message_id": mid})
+        bot._later(minutes * 60, drop())
+    return "QR sent to your DM" if sent else "UPI link sent to your DM"

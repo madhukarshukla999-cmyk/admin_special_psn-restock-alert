@@ -6,11 +6,11 @@ const ALLOWED_HOSTS = [
   "www.gyftr.com", "store.jiogames.com", "shop.rooter.gg", "offers.myhubble.money",
   "digistore.co.in", "www.woohoo.in",
 ];
-const AUTO_STORES = ["gamestheshop", "amazon"];   // stores where it clicks through to checkout
+const AUTO_STORES = ["gamestheshop", "amazon", "flipkart"];   // stores where it clicks through to checkout
 
 const DEFAULTS = {
   topic: "", server: "https://ntfy.sh", enabled: true, autoClick: true, sound: true,
-  stores: { gamestheshop: true, amazon: true, others: true },
+  stores: { gamestheshop: true, amazon: true, flipkart: true, others: true },
   maxPrice: 0,               // 0 = no limit
 };
 
@@ -138,7 +138,8 @@ async function handleAlert(data) {
   const opened = [];
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
-    const clickThrough = s.autoClick && auto && (data.store !== "amazon" || i === last);
+    // Amazon / Flipkart: each checkout is its own order, so only the highest-value tab clicks through
+    const clickThrough = s.autoClick && auto && (!["amazon", "flipkart"].includes(data.store) || i === last);
     // Always the product page: Amazon's cart-add link (cart_url) often lands on an empty cart.
     const tab = await chrome.tabs.create({ url: safeUrl(it.url), active: i === last,
                                            ...(win ? { windowId: win.id } : {}) });

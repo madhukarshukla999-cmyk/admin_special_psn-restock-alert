@@ -1232,37 +1232,55 @@ class Controls:
                 return f"Removed <b>{html.escape(label)}</b>."
             return "Usage: <code>/gtsbuy remove &lt;label&gt;</code>\n\n" + acc_list()
 
+        if sub in ("on", "off"):
+            self.bot.state.settings["gts_auto"] = sub == "on"
+            self.bot.state.save()
+            n = sum(1 for a in accts.values() if a.get("access"))
+            if sub == "on":
+                return (f"🟢 <b>Auto-buy ON.</b> When GamesTheShop cards restock, each of your {n} logged-in "
+                        f"account{'s' if n != 1 else ''} places one order per card and the QRs come here "
+                        f"(deleted after {gc.QR_MINUTES} min).\n"
+                        "Tip: switch GamesTheShop off in the laptop extension, or you'll get orders from both.")
+            return "⏸ <b>Auto-buy OFF.</b> Restocks only send the usual alerts."
+
         if sub == "test":
-            url = args[1] if len(args) > 1 else ""
-            m = _re.search(r"/product/([0-9a-f-]{36})", url)
-            v = _re.search(r"variant=([0-9a-f-]{36})", url)
-            if not (m and v):
-                return ("Usage: <code>/gtsbuy test &lt;card link&gt;</code>\n"
-                        "The link must look like <code>.../product/&lt;id&gt;?variant=&lt;id&gt;</code>.")
+            links = [a for a in args[1:] if "gamestheshop.com" in a]
+            items = []
+            for url in links:
+                m = _re.search(r"/product/([0-9a-f-]{36})", url)
+                v = _re.search(r"variant=([0-9a-f-]{36})", url)
+                if m and v:
+                    items.append(Item(store="gamestheshop", item_id=v.group(1), title=f"test card {len(items) + 1}",
+                                      url=url, in_stock=True, extra={"product_id": m.group(1)}))
+            if not items:
+                return ("Usage: <code>/gtsbuy test &lt;card link&gt; [more links…]</code>\n"
+                        "Links must look like <code>.../product/&lt;id&gt;?variant=&lt;id&gt;</code>.")
             logged = [l for l, a in accts.items() if a.get("access")]
             if not logged:
                 return "No logged-in account. Add one with <code>/gtsbuy add &lt;mobile&gt;</code> first."
             label = logged[0]
-            item = Item(store="gamestheshop", item_id=v.group(1), title="GamesTheShop card (test)",
-                        url=url, in_stock=True, extra={"product_id": m.group(1)})
-            try:
-                res = await gc.checkout(client, self.bot.state, accts[label], item)
-            except gc.GtsError as e:
-                return f"❌ {html.escape(str(e))}"
-            head = (f"✅ Checkout works for <b>{html.escape(label)}</b>.\n"
-                    f"Order {html.escape(str(res['order_id']))[:12]}…, amount ₹{res.get('amount')}.\n")
-            try:
-                how = await gc.pay_to_dm(self.bot, client, label, "test order", res, [str(cid)])
-            except gc.GtsError as e:
-                return head + f"❌ Payment step: {html.escape(str(e))}"
-            return (head + f"📲 {how}. <b>This is a real order:</b> only scan it if you want to buy. "
-                    "Unpaid, it expires by itself.")
+            lines = []
+            for it in items:                                  # one order per card, like a real restock
+                try:
+                    res = await gc.checkout(client, self.bot.state, accts[label], it)
+                except gc.GtsError as e:
+                    lines.append(f"❌ {it.title}: {html.escape(str(e))}")
+                    continue
+                try:
+                    how = await gc.pay_to_dm(self.bot, client, label, it.title, res, [str(cid)])
+                    lines.append(f"✅ {it.title}: ₹{res.get('amount')} – {how}")
+                except gc.GtsError as e:
+                    lines.append(f"⚠️ {it.title}: order placed, payment step failed: {html.escape(str(e))}")
+            return (f"<b>Test with {html.escape(label)}</b>\n" + "\n".join(lines) +
+                    "\n\n<b>These are real orders:</b> only scan a QR if you want to buy. Unpaid, they expire by themselves.")
 
-        return ("🛒 <b>GamesTheShop auto-checkout</b> (owner)\n\n"
+        return ("🛒 <b>GamesTheShop auto-buy</b> (owner)\n"
+                f"Status: <b>{'🟢 ON' if gc.auto_on(self.bot.state) else '⏸ OFF'}</b>\n\n"
                 f"{acc_list()}\n\n"
                 "<code>/gtsbuy add &lt;mobile&gt;</code> – log in an account (OTP)\n"
                 "<code>/gtsbuy otp &lt;code&gt;</code> – finish the login\n"
-                "<code>/gtsbuy test &lt;card link&gt;</code> – place one unpaid order to check it works\n"
+                "<code>/gtsbuy on</code> / <code>off</code> – auto-buy on restock (one order per card per account)\n"
+                "<code>/gtsbuy test &lt;link&gt; [link…]</code> – place real orders now and get their QRs\n"
                 "<code>/gtsbuy remove &lt;label&gt;</code> – remove an account")
 
     async def _extension_command(self, client, args: list[str], cid=None) -> str:

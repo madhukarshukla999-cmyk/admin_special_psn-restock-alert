@@ -17,6 +17,7 @@ Tokens persist in the bot's state (Postgres on Heroku), so logins survive restar
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -32,6 +33,8 @@ except ImportError:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 API = "https://green-api.gamestheshop.com/storefront"
+QR_MINUTES = 5            # the QR is deleted from Telegram after this long
+COOLDOWN = 10 * 60        # same account + same card: no second order within this time (stock flapping)
 # The storefront API only answers requests that look like they come from the shop's own site.
 # (The stock checker sends the same Origin/Referer; without them the API rejects the call.)
 SITE = {
@@ -288,7 +291,7 @@ async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: li
     import html as _html
     link = await paytm_upi_link(pay)
     amount = pay.get("amount") or "?"
-    minutes = 15                                   # Paytm txnToken lifetime
+    minutes = QR_MINUTES
     caption = (f"💳 <b>GamesTheShop</b> · {_html.escape(title)}\n"
                f"👤 Account: {_html.escape(label)}\n"
                f"💰 ₹{_html.escape(str(amount))} · 🧾 {_html.escape(str(pay.get('paytmOrderId', ''))[:40])}\n\n"
@@ -308,3 +311,60 @@ async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: li
             await bot.tg.api(client, "deleteMessage", {"chat_id": cid, "message_id": mid})
         bot._later(minutes * 60, drop())
     return "QR sent to your DM" if sent else "UPI link sent to your DM"
+
+
+# -- automatic checkout on restock -------------------------------------------------------------
+def auto_on(state) -> bool:
+    return bool(state.settings.get("gts_auto"))
+
+
+async def _pay_safe(bot, client, label, title, pay, chat_ids):
+    import html as _html
+    try:
+        await pay_to_dm(bot, client, label, title, pay, chat_ids)
+    except GtsError as e:
+        await bot.tg.send(client, f"⚠️ GamesTheShop · {_html.escape(label)} · {_html.escape(title)}: order placed, "
+                                  f"but no QR – {_html.escape(str(e))}", chat_ids=chat_ids)
+    except Exception:  # noqa: BLE001
+        log.exception("GamesTheShop QR failed")
+
+
+async def auto_checkout(bot, client, items) -> None:
+    """A restock with one or more cards: every logged-in account places ONE ORDER PER CARD
+    (highest value first) and each order's QR goes to the owner's DM as soon as it's ready.
+    Accounts run in parallel; within an account the orders go one after another (buy-now cart is
+    per account), while each QR is fetched in the background so the first one arrives quickly."""
+    import html as _html
+    state = bot.state
+    accts = {l: a for l, a in accounts(state).items() if a.get("access") and a.get("user_id")}
+    items = sorted([i for i in items if (i.extra or {}).get("product_id")],
+                   key=lambda i: -(i.denomination or 0))
+    if not accts or not items:
+        return
+    owners = bot.users.recipients(admins_only=True)
+    recent = state.settings.setdefault("gts_recent", {})          # "label|variant" -> ts
+    now = time.time()
+    for k in [k for k, t in recent.items() if now - t > COOLDOWN]:
+        recent.pop(k)
+
+    async def one_account(label, acc):
+        for it in items:
+            key = f"{label}|{it.item_id}"
+            if time.time() - recent.get(key, 0) < COOLDOWN:
+                continue                                          # ordered this card a moment ago
+            recent[key] = time.time()
+            try:
+                pay = await checkout(client, state, acc, it)
+            except GtsError as e:
+                await bot.tg.send(client, f"⚠️ GamesTheShop auto-buy · {_html.escape(label)} · "
+                                          f"{_html.escape(it.title)}: {_html.escape(str(e))}", chat_ids=owners)
+                if "login expired" in str(e):
+                    return                                        # no point trying the other cards
+                continue
+            log.info("GamesTheShop: %s ordered %s (%s)", label, it.title, pay.get("paytmOrderId"))
+            task = asyncio.create_task(_pay_safe(bot, client, label, it.title, pay, owners))
+            bot._bg.add(task)
+            task.add_done_callback(bot._bg.discard)
+
+    await asyncio.gather(*(one_account(l, a) for l, a in accts.items()))
+    state.save()

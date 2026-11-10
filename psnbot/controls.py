@@ -615,6 +615,8 @@ class Controls:
             text = await self._extension_command(client, args, cid)
             if text:
                 await send(text, reply_markup=self._extension_markup())
+        elif cmd in ("/gtsbuy", "/gts") and admin:
+            await send(await self._gtsbuy_command(client, args, cid))
         elif cmd == "/update" and admin:
             await send("⬆️ Checking for updates…")
             await self.bot.run_update(client, manual_cid=cid)
@@ -1174,6 +1176,90 @@ class Controls:
         self.bot.state.settings["ext_qr_mode"] = mode
         self.bot.state.save()
         await ep.publish_control(client, self.bot.state)
+
+    async def _gtsbuy_command(self, client, args: list[str], cid=None) -> str:
+        """Manage GamesTheShop checkout accounts and run a dry-run checkout (owner only)."""
+        from . import gtscheckout as gc
+        from .models import Item
+        import re as _re
+
+        accts = gc.accounts(self.bot.state)
+        sub = args[0].lower() if args else ""
+
+        def acc_list() -> str:
+            if not accts:
+                return "No accounts yet."
+            out = []
+            for label, a in accts.items():
+                state = "⏳ waiting for OTP" if a.get("pending_otp") else ("✅ logged in" if a.get("access") else "not logged in")
+                out.append(f"• <b>{html.escape(label)}</b> — {state}")
+            return "\n".join(out)
+
+        if sub in ("add", "login"):
+            if len(args) < 2:
+                return "Usage: <code>/gtsbuy add &lt;mobile&gt;</code> (your GamesTheShop mobile number)"
+            mobile = _re.sub(r"\D", "", args[1])[-10:]
+            if len(mobile) != 10:
+                return "That doesn't look like a 10-digit mobile number."
+            label = args[2] if len(args) > 2 else mobile
+            try:
+                await gc.request_otp(client, mobile)
+            except gc.GtsError as e:
+                return f"❌ {html.escape(str(e))}"
+            accts[label] = {**accts.get(label, {}), "mobile": mobile, "pending_otp": True}
+            self.bot.state.save()
+            return (f"📲 OTP sent to <b>{mobile}</b>. Reply with:\n<code>/gtsbuy otp &lt;code&gt;</code>"
+                    + (f" {label}" if label != mobile else ""))
+
+        if sub == "otp":
+            if len(args) < 2:
+                return "Usage: <code>/gtsbuy otp &lt;code&gt; [label]</code>"
+            otp = _re.sub(r"\D", "", args[1])
+            label = args[2] if len(args) > 2 else next((l for l, a in accts.items() if a.get("pending_otp")), None)
+            if not label or label not in accts:
+                return "No account is waiting for an OTP. Start with <code>/gtsbuy add &lt;mobile&gt;</code>."
+            try:
+                await gc.verify_otp(client, self.bot.state, label, accts[label]["mobile"], otp)
+            except gc.GtsError as e:
+                return f"❌ {html.escape(str(e))}"
+            return f"✅ Logged in: <b>{html.escape(label)}</b>. Try <code>/gtsbuy test &lt;card link&gt;</code>."
+
+        if sub in ("remove", "delete", "logout"):
+            label = args[1] if len(args) > 1 else None
+            if label in accts:
+                accts.pop(label)
+                self.bot.state.save()
+                return f"Removed <b>{html.escape(label)}</b>."
+            return "Usage: <code>/gtsbuy remove &lt;label&gt;</code>\n\n" + acc_list()
+
+        if sub == "test":
+            url = args[1] if len(args) > 1 else ""
+            m = _re.search(r"/product/([0-9a-f-]{36})", url)
+            v = _re.search(r"variant=([0-9a-f-]{36})", url)
+            if not (m and v):
+                return ("Usage: <code>/gtsbuy test &lt;card link&gt;</code>\n"
+                        "The link must look like <code>.../product/&lt;id&gt;?variant=&lt;id&gt;</code>.")
+            logged = [l for l, a in accts.items() if a.get("access")]
+            if not logged:
+                return "No logged-in account. Add one with <code>/gtsbuy add &lt;mobile&gt;</code> first."
+            label = logged[0]
+            item = Item(store="gamestheshop", item_id=v.group(1), title="GamesTheShop card (test)",
+                        url=url, in_stock=True, extra={"product_id": m.group(1)})
+            try:
+                res = await gc.checkout(client, self.bot.state, accts[label], item)
+            except gc.GtsError as e:
+                return f"❌ {html.escape(str(e))}"
+            return (f"✅ Checkout works for <b>{html.escape(label)}</b>.\n"
+                    f"Order {html.escape(str(res['order_id']))[:12]}…, amount ₹{res.get('amount')}.\n"
+                    "A real (unpaid) order was placed and will expire if you don't pay. "
+                    "Paytm payment delivery to your DM is the next step.")
+
+        return ("🛒 <b>GamesTheShop auto-checkout</b> (owner)\n\n"
+                f"{acc_list()}\n\n"
+                "<code>/gtsbuy add &lt;mobile&gt;</code> – log in an account (OTP)\n"
+                "<code>/gtsbuy otp &lt;code&gt;</code> – finish the login\n"
+                "<code>/gtsbuy test &lt;card link&gt;</code> – place one unpaid order to check it works\n"
+                "<code>/gtsbuy remove &lt;label&gt;</code> – remove an account")
 
     async def _extension_command(self, client, args: list[str], cid=None) -> str:
         from . import extension_push as ep

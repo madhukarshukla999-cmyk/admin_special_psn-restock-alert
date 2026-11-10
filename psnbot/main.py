@@ -548,6 +548,13 @@ class Bot:
             sid = items[0].store
             owner_wants = [i for i in items if any(sid not in self.users.muted(a) and self.users.wants_value(a, sid, i.denomination)
                                                    for a in self.users.admins)]
+            if sid == "gamestheshop" and owner_wants and not self.tg.dry_run:
+                # server-side checkout first: one order per card per GamesTheShop account (/gtsbuy on)
+                from . import gtscheckout
+                if gtscheckout.auto_on(self.state):
+                    task = asyncio.create_task(gtscheckout.auto_checkout(self, client, owner_wants))
+                    self._bg.add(task)
+                    task.add_done_callback(self._bg.discard)
             if (owner_wants and self.cfg.get("extension_push", True) and not self.tg.dry_run
                     and not extension_push.paused(self.state)):
                 # laptop extension first: it's the fastest path to checkout

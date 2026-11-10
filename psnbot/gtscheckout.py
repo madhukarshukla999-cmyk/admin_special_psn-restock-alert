@@ -129,14 +129,15 @@ async def _verify_otp(session, state, label: str, mobile: str, otp: str) -> dict
         raise GtsError(data.get("message") or f"wrong or expired OTP (HTTP {r.status_code})")
     acc = accounts(state).setdefault(label, {})
     acc.update(mobile=mobile, access=access, refresh=refresh, pending_otp=False, added=time.time())
+    state.save()                                   # save the login first, so a profile hiccup can't lose it
     # fill in user_id (needed for the cart call), reusing the same connection as the verify call
     try:
-        prof = _json(await _get(client, "/customer/profile", headers=_auth(acc), session=session)).get("data") or {}
+        prof = _json(await _get(None, "/customer/profile", headers=_auth(acc), session=session)).get("data") or {}
         acc["user_id"] = str(prof.get("user_id") or prof.get("id") or "")
         acc["addresses"] = prof.get("addresses") if isinstance(prof.get("addresses"), list) else acc.get("addresses")
-    except GtsError:
-        pass
-    state.save()
+        state.save()
+    except Exception as e:  # noqa: BLE001 - login already saved; user_id is filled in on first use
+        log.warning("GamesTheShop: profile lookup after login failed: %r", e)
     return acc
 
 
@@ -224,7 +225,7 @@ def _cart_body(v: dict, product_id: str, variant_id: str, item) -> dict:
 async def checkout(client, state, acc: dict, item) -> dict:
     """Run one buy-now checkout for `item` (a bot Item for a GamesTheShop card).
     Returns {paytmOrderId, txnToken, amount, mid} ready for payment. Places a real (unpaid) order."""
-    if not acc.get("access") or not acc.get("user_id"):
+    if not acc.get("access"):
         raise GtsError("not logged in – add the account with /gtsbuy add <mobile>")
     H = _auth(acc)
     product_id = (getattr(item, "extra", {}) or {}).get("product_id")
@@ -232,6 +233,18 @@ async def checkout(client, state, acc: dict, item) -> dict:
         raise GtsError("missing product id for this card")
 
     async with _session() as s:                       # one open connection for all the calls below
+        if not acc.get("user_id"):                    # login-time profile fetch may have been skipped
+            pr = await _get(None, "/customer/profile", headers=H, session=s)
+            if pr.status_code in (401, 403):
+                raise GtsError("login expired – add this account again with /gtsbuy add")
+            prof = _json(pr).get("data") or {}
+            acc["user_id"] = str(prof.get("user_id") or prof.get("id") or "")
+            if isinstance(prof.get("addresses"), list):
+                acc["addresses"] = prof["addresses"]
+            if not acc.get("user_id"):
+                raise GtsError("couldn't read the account id – add the account again with /gtsbuy add")
+            state.save()
+
         # card details (cached), so the cart matches what the website sends (prices, category, etc.)
         v, _d = await _variant(client, product_id, item.item_id, session=s)
 

@@ -48,9 +48,11 @@ OWNER_COMMANDS = [
     {"command": "groups", "description": "Post alerts to a group / channel"},
     {"command": "users", "description": "Who gets alerts"},
     {"command": "extension", "description": "Connect the laptop browser extension"},
+    {"command": "buy", "description": "GamesTheShop auto-buy (accounts, on/off)"},
     {"command": "update", "description": "Install the latest version"},
 ]
-OWNER_ONLY = {"/panel", "/dashboard", "/owner", "/groups", "/group", "/channels", "/users", "/update", "/extension"}
+OWNER_ONLY = {"/panel", "/dashboard", "/owner", "/groups", "/group", "/channels", "/users", "/update", "/extension",
+              "/buy", "/gtsbuy", "/gts", "/autobuy"}
 ALIASES = {"start": "menu", "settings": "menu", "notifications": "menu", "intervals": "cycles",
            "weekly": "week", "report": "week", "night": "quiet", "cards": "values", "best": "besttime"}
 
@@ -109,6 +111,7 @@ class Controls:
         self.users = bot.users
         self._last_manual_check = 0.0
         self._group_cmd_at: dict[str, float] = {}
+        self._ask: dict[str, dict] = {}       # chat -> what /buy is waiting for them to type
 
     def _save(self) -> None:
         self.bot.state.save()
@@ -310,6 +313,7 @@ class Controls:
              {"text": f"🔒 Private stores ({len(self.users.private())})", "callback_data": "pv:home"}],
             [{"text": f"📢 Groups ({len(b.groups.all)})", "callback_data": "gr:list"},
              {"text": "📊 Weekly report", "callback_data": "wk:pn"}],
+            [{"text": "🛒 GamesTheShop auto-buy", "callback_data": "gb:home"}],
             [{"text": "🔎 Check all now", "callback_data": "pn:check"}, {"text": "🔄 Refresh", "callback_data": "pn:home"}],
         ]
         return "\n".join(lines), {"inline_keyboard": rows}
@@ -503,7 +507,7 @@ class Controls:
             "Turning a store off only stops its messages; it's still checked in the background.")
 
     HELP_OWNER = ("\n\n🔐 <b>Only you see this</b>\n"
-                  "/panel: everything in one place · /groups: post to groups and channels · /users · /extension · /update\n"
+                  "/panel: everything in one place · /buy: GamesTheShop auto-buy · /groups: post to groups and channels · /users · /extension · /update\n"
                   "🔒 Private stores and ⏳ alert delays (in /panel) are invisible to everyone else.")
 
     # -- handling --------------------------------------------------------
@@ -524,6 +528,12 @@ class Controls:
             await self._group_command(client, msg, chat)
             return
         text = (msg.get("text") or "").strip()
+        ask = self._ask.get(str(cid)) if cid else None
+        if ask and text and not text.startswith("/") and self.users.is_admin(cid):
+            if time.time() - ask["ts"] < 600:
+                await self._buy_on_text(client, str(cid), text)
+                return
+            self._ask.pop(str(cid), None)
         if not cid or not text.startswith("/"):
             return
         cid = str(cid)
@@ -615,8 +625,13 @@ class Controls:
             text = await self._extension_command(client, args, cid)
             if text:
                 await send(text, reply_markup=self._extension_markup())
-        elif cmd in ("/gtsbuy", "/gts") and admin:
-            await send(await self._gtsbuy_command(client, args, cid))
+        elif cmd in ("/buy", "/gtsbuy", "/gts", "/autobuy") and admin:
+            self._ask.pop(cid, None)
+            if not args:
+                text, kb = self._buy_view()
+                await send(text, reply_markup=kb)
+            else:
+                await send(await self._gtsbuy_command(client, args, cid))
         elif cmd == "/update" and admin:
             await send("⬆️ Checking for updates…")
             await self.bot.run_update(client, manual_cid=cid)
@@ -636,6 +651,12 @@ class Controls:
             await self._on_user_button(client, cq, cid, data)
             return
         mid = msg.get("message_id")
+        if data.startswith("gb:"):
+            if not self.users.is_admin(cid):
+                await self.tg.answer_callback(client, cq["id"], "Not available")
+                return
+            await self._on_buy_button(client, cq, cid, mid, data)
+            return
         if data.startswith("qh:") or data.startswith("cv:"):
             await self._on_personal_button(client, cq, cid, mid, data)
             return
@@ -1176,6 +1197,159 @@ class Controls:
         self.bot.state.settings["ext_qr_mode"] = mode
         self.bot.state.save()
         await ep.publish_control(client, self.bot.state)
+
+    # -- /buy: GamesTheShop auto-buy, all with buttons -----------------------------------------
+    def _buy_view(self, note: str = "") -> tuple[str, dict]:
+        from . import gtscheckout as gc
+        st = self.bot.state
+        accts = gc.accounts(st)
+        on = gc.auto_on(st)
+        logged = [l for l, a in accts.items() if a.get("access")]
+        lines = ["🛒 <b>GamesTheShop auto-buy</b>", ""]
+        if note:
+            lines += [note, ""]
+        lines.append(f"Status: <b>{'🟢 ON' if on else '⏸ OFF'}</b>")
+        lines.append("When PlayStation cards come back, each account orders one of every card, and the "
+                     f"payment QRs arrive here. Each QR is deleted after {gc.QR_MINUTES} min. "
+                     "Nothing is paid until you scan one.")
+        lines += ["", "<b>Accounts</b>"]
+        if not accts:
+            lines.append("None yet. Tap ➕ Add account.")
+        for label, a in accts.items():
+            state = "⏳ waiting for OTP" if a.get("pending_otp") and not a.get("access") else \
+                    "✅ ready" if a.get("access") else "❌ not logged in"
+            lines.append(f"• {html.escape(label)} — {state}")
+        if on and not logged:
+            lines += ["", "⚠️ Auto-buy is on, but no account is logged in yet."]
+        rows = [[{"text": "⏸ Turn auto-buy OFF" if on else "🟢 Turn auto-buy ON", "callback_data": "gb:tog"}],
+                [{"text": "➕ Add account", "callback_data": "gb:add"},
+                 {"text": "🧪 Test with a link", "callback_data": "gb:test"}]]
+        for label in list(accts)[:8]:
+            rows.append([{"text": f"🗑 Remove {label}"[:40], "callback_data": f"gb:rm?:{label}"[:64]}])
+        rows.append([{"text": "🔄 Refresh", "callback_data": "gb:home"}])
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    def _ask_markup(self, extra: list | None = None) -> dict:
+        return {"inline_keyboard": ([extra] if extra else []) + [[{"text": "✖ Cancel", "callback_data": "gb:cancel"}]]}
+
+    async def _on_buy_button(self, client, cq, cid: str, mid, data: str) -> None:
+        from . import gtscheckout as gc
+        st = self.bot.state
+        accts = gc.accounts(st)
+        parts = data.split(":", 2)
+        act, arg = parts[1], (parts[2] if len(parts) > 2 else "")
+        note = ""
+        if act == "tog":
+            st.settings["gts_auto"] = not gc.auto_on(st)
+            st.save()
+            note = ("🟢 Auto-buy is <b>ON</b>. Tip: switch GamesTheShop off in the laptop extension, "
+                    "or you'll get orders from both." if gc.auto_on(st) else "⏸ Auto-buy is <b>OFF</b>.")
+            await self.tg.answer_callback(client, cq["id"], "Auto-buy " + ("ON" if gc.auto_on(st) else "OFF"))
+        elif act == "add":
+            self._ask[cid] = {"kind": "mobile", "ts": time.time()}
+            await self.tg.answer_callback(client, cq["id"])
+            await self.tg.edit(client, cid, mid, "📱 <b>Add a GamesTheShop account</b>\n\n"
+                               "Type the account's <b>mobile number</b> here (10 digits) and send it.\n"
+                               "GamesTheShop will text it an OTP.", self._ask_markup())
+            return
+        elif act == "test":
+            if not any(a.get("access") for a in accts.values()):
+                await self.tg.answer_callback(client, cq["id"], "Add an account first", )
+                return
+            self._ask[cid] = {"kind": "test", "ts": time.time()}
+            await self.tg.answer_callback(client, cq["id"])
+            await self.tg.edit(client, cid, mid, "🧪 <b>Test</b>\n\nPaste one or more GamesTheShop card links here "
+                               "(one message, links separated by spaces or new lines).\n\n"
+                               "⚠️ <b>This places real orders</b> and sends their QRs. Only scan a QR if you want "
+                               "to buy. Unpaid orders expire by themselves.", self._ask_markup())
+            return
+        elif act == "resend" and arg in accts:
+            try:
+                await gc.request_otp(client, accts[arg]["mobile"])
+                await self.tg.answer_callback(client, cq["id"], "OTP sent again 📲")
+            except gc.GtsError as e:
+                await self.tg.answer_callback(client, cq["id"], str(e)[:190])
+            self._ask[cid] = {"kind": "otp", "label": arg, "ts": time.time(), "tries": 0}
+            return
+        elif act == "rm?" and arg in accts:
+            await self.tg.answer_callback(client, cq["id"])
+            await self.tg.edit(client, cid, mid, f"🗑 Remove <b>{html.escape(arg)}</b> from auto-buy?\n"
+                               "Its saved login is deleted from the bot.",
+                               {"inline_keyboard": [[{"text": "Yes, remove", "callback_data": f"gb:rm!:{arg}"[:64]},
+                                                     {"text": "Cancel", "callback_data": "gb:home"}]]})
+            return
+        elif act == "rm!" and arg in accts:
+            accts.pop(arg)
+            st.save()
+            note = f"🗑 Removed {html.escape(arg)}."
+            await self.tg.answer_callback(client, cq["id"], "Removed")
+        else:                                   # home / cancel / refresh
+            self._ask.pop(cid, None)
+            await self.tg.answer_callback(client, cq["id"])
+        text, kb = self._buy_view(note)
+        await self.tg.edit(client, cid, mid, text, kb)
+
+    async def _buy_on_text(self, client, cid: str, text: str) -> None:
+        """The owner typed an answer for /buy: a mobile number, an OTP, or links to test."""
+        from . import gtscheckout as gc
+        import re as _re
+        st = self.bot.state
+        accts = gc.accounts(st)
+        ask = self._ask[cid]
+        send = lambda t, **kw: self.tg.send(client, t, chat_ids=[cid], **kw)  # noqa: E731
+
+        if ask["kind"] == "mobile":
+            digits = _re.sub(r"\D", "", text)
+            mobile = digits[-10:] if len(digits) >= 10 else ""
+            if not _re.fullmatch(r"[6-9]\d{9}", mobile):
+                await send("That doesn't look like a mobile number. Type the 10 digits, e.g. <code>9876543210</code>.",
+                           reply_markup=self._ask_markup())
+                return
+            try:
+                await gc.request_otp(client, mobile)
+            except gc.GtsError as e:
+                await send(f"❌ {html.escape(str(e))}\nCheck the number and send it again.", reply_markup=self._ask_markup())
+                return
+            accts[mobile] = {**accts.get(mobile, {}), "mobile": mobile, "pending_otp": True}
+            st.save()
+            self._ask[cid] = {"kind": "otp", "label": mobile, "ts": time.time(), "tries": 0}
+            await send(f"📲 OTP sent to <b>{mobile}</b>.\n\nType the <b>OTP</b> from the SMS here and send it.",
+                       reply_markup=self._ask_markup([{"text": "🔁 Send OTP again", "callback_data": f"gb:resend:{mobile}"}]))
+            return
+
+        if ask["kind"] == "otp":
+            label = ask["label"]
+            otp = _re.sub(r"\D", "", text)
+            if not 4 <= len(otp) <= 8:
+                await send("Type just the code from the SMS, e.g. <code>123456</code>.", reply_markup=self._ask_markup())
+                return
+            try:
+                await gc.verify_otp(client, st, label, accts[label]["mobile"], otp)
+            except (gc.GtsError, KeyError) as e:
+                ask["tries"] = ask.get("tries", 0) + 1
+                if ask["tries"] >= 3:
+                    self._ask.pop(cid, None)
+                    t, kb = self._buy_view(f"❌ Login failed 3 times ({html.escape(str(e))}). Tap ➕ Add account to start again.")
+                    await send(t, reply_markup=kb)
+                    return
+                await send(f"❌ {html.escape(str(e))}\nType the OTP again.",
+                           reply_markup=self._ask_markup([{"text": "🔁 Send OTP again", "callback_data": f"gb:resend:{label}"}]))
+                return
+            self._ask.pop(cid, None)
+            t, kb = self._buy_view(f"✅ <b>{html.escape(label)}</b> is logged in.")
+            await send(t, reply_markup=kb)
+            return
+
+        if ask["kind"] == "test":
+            links = _re.findall(r"https?://\S*gamestheshop\.com\S*", text)
+            if not links:
+                await send("I didn't find a GamesTheShop link. Paste the card's link from the browser.",
+                           reply_markup=self._ask_markup())
+                return
+            self._ask.pop(cid, None)
+            await send(f"⏳ Placing {len(links)} test order{'s' if len(links) != 1 else ''}…")
+            result = await self._gtsbuy_command(client, ["test", *links], cid)
+            await send(result, reply_markup={"inline_keyboard": [[{"text": "⬅ Back to auto-buy", "callback_data": "gb:home"}]]})
 
     async def _gtsbuy_command(self, client, args: list[str], cid=None) -> str:
         """Manage GamesTheShop checkout accounts and run a dry-run checkout (owner only)."""

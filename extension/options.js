@@ -3,7 +3,7 @@ const DEFAULTS = {
   topic: "", server: "https://ntfy.sh", enabled: true, autoClick: true, sound: true, maxPrice: 0, clickPayNow: true,
   amazonUpiQr: true, upiId: "", tgQr: true, tgToken: "", tgChatId: "", browserName: "", gtsMobile: "", qrTimeoutSec: 120, qrMode: "dm", amzMobile: "", gtsPayWith: "upi", cardLast4: "", cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "", cardAutoPay: true,
   browserType: "", profileName: "", accountName: "", setupDone: false, remotePaused: false,
-  stores: { gamestheshop: true, amazon: true, others: true },
+  stores: { gamestheshop: true, amazon: true, flipkart: true, others: true },
   // keep in step with AMZ_WATCH_DEFAULTS in background.js
   amzWatch: false, amzWatchSec: 15, amzWatchInfo: "", amzGiftEmail: "",
   gtsWatch: false, gtsWatchSec: 1, gtsWatchInfo: "",                    // keep in step with GTS_WATCH_DEFAULTS
@@ -109,7 +109,7 @@ async function load() {
                                             : "– not set"; $("amzName").value = (s.amzAccount && s.amzAccount.name) || ""; $("qrTimeoutSec").value = s.qrTimeoutSec || 120; $("gtsMobile").value = s.gtsMobile || "";
   $("gtsMobile").placeholder = acc && acc.mobile ? `auto: +91 ${acc.mobile}` : "auto-detected";
   $("upiId").value = s.upiId || "";
-  for (const k of ["gamestheshop", "amazon", "others"]) $("st_" + k).checked = s.stores[k];
+  for (const k of ["gamestheshop", "amazon", "flipkart", "others"]) $("st_" + k).checked = s.stores[k];
   $("amzWatch").checked = s.amzWatch; $("amzWatchSec").value = s.amzWatchSec || 15;
   $("amzWatchList").value = s.amzWatchList; $("amzGiftEmail").value = s.amzGiftEmail || "";
   $("amzWatchInfo").textContent = s.amzWatch ? s.amzWatchInfo || "Starting…" : "";
@@ -210,7 +210,7 @@ $("save").onclick = async () => {
     cardName: $("cardName").value.trim(), cardCvv: $("cardCvv").value.replace(/\D/g, ""), cardAutoPay: $("cardAutoPay").checked,
     cardLast4: ($("cardNumber").value.replace(/\D/g, "") || $("cardLast4").value).slice(-4), qrTimeoutSec: Math.max(30, Number($("qrTimeoutSec").value) || 120),
     gtsMobile: mobileOf($("gtsMobile").value), upiId: $("upiId").value.trim(),
-    stores: { gamestheshop: $("st_gamestheshop").checked, amazon: $("st_amazon").checked, others: $("st_others").checked },
+    stores: { gamestheshop: $("st_gamestheshop").checked, amazon: $("st_amazon").checked, flipkart: $("st_flipkart").checked, others: $("st_others").checked },
     amzWatch: $("amzWatch").checked, amzWatchSec: Math.max(5, Number($("amzWatchSec").value) || 15),
     amzWatchList: $("amzWatchList").value.trim(),
     gtsWatch: $("gtsWatch").checked, gtsWatchSec: Math.max(1, Number($("gtsWatchSec").value) || 1),
@@ -226,7 +226,8 @@ $("test").onclick = () => {
   const urls = $("testUrl").value.split(/\s+/).filter((u) => u.startsWith("https://"));
   if (!urls.length) urls.push("https://www.gamestheshop.com/");
   const url = urls[0];
-  const store = url.includes("amazon.in") ? "amazon" : url.includes("gamestheshop.com") ? "gamestheshop" : "test";
+  const store = url.includes("amazon.in") ? "amazon" : url.includes("gamestheshop.com") ? "gamestheshop"
+    : url.includes("flipkart.com") ? "flipkart" : "test";
   chrome.runtime.sendMessage({ type: "test", url, urls, store });
 };
 

@@ -537,6 +537,152 @@ async function amazon(job) {
   }
 }
 
+// ---- Flipkart: product page → Buy Now → checkout (address / order summary) → UPI ----
+// Never presses Pay, except to send a UPI request to the UPI ID saved in Options (you approve it
+// in your UPI app with your PIN, like GamesTheShop). Never touches card, net banking or cash on delivery.
+const FK_SOLD = /^(sold out|coming soon|currently unavailable|out of stock|notify me|temporarily unavailable)$/i;
+const FK_CANT_BUY = /not available (to|for) purchase|cannot be (bought|purchased)|can't be (bought|purchased)|item is unavailable/i;
+// a visible, enabled button whose own text matches
+const fkBtn = (re) => () => {
+  const e = textEl(re, "button, a, [role=button], input[type=submit], label, span, div");
+  if (!e) return null;
+  const b = e.closest("button, a, [role=button], input[type=submit], label") || e;
+  return enabled(b) ? b : null;
+};
+function fkDiag() {
+  const btns = [...document.querySelectorAll("button, [role=button], input[type=submit]")].filter(visible)
+    .map((b) => (b.innerText || b.value || "").trim().replace(/\s+/g, " ")).filter(Boolean).slice(0, 10);
+  const inputs = [...document.querySelectorAll("input:not([type=hidden]):not([type=radio]), textarea")].filter(visible)
+    .slice(0, 6).map((i) => fieldText(i, true).replace(/\s+/g, " ").slice(0, 40));
+  return `[debug ${location.pathname.slice(0, 40)} | btns:${JSON.stringify(btns)} inputs:${JSON.stringify(inputs)} ` +
+         `radios:${document.querySelectorAll("input[type=radio]").length}]`;
+}
+// the "UPI" payment option (its radio button if it has one)
+function fkUpiOption() {
+  for (const r of document.querySelectorAll('input[type="radio"], [role="radio"]')) {
+    let row = r;
+    for (let i = 0; i < 10 && row.parentElement && row.parentElement !== document.body; i++) {
+      if (row.parentElement.querySelectorAll('input[type="radio"], [role="radio"]').length > 1) break;
+      row = row.parentElement;
+    }
+    if (/^\s*upi\b/i.test(row.innerText || "")) return r;
+  }
+  const t = textEl(/^upi$/i, "label, span, div, li, button");
+  return t ? (t.closest("label, li, [role=radio], [role=button], button") || t) : null;
+}
+const fkLoginStep = () => [...document.querySelectorAll("input")].some((i) => visible(i) &&
+  /email\/mobile|mobile number|enter otp/i.test(fieldText(i, true))) && /log ?in|sign ?up|request otp/i.test(document.body.innerText);
+
+async function flipkart(job) {
+  const path = location.pathname;
+  if (/\/orderresponse/.test(path)) return;                       // order placed: the purchase watcher reports it
+  if (/\/account\/login/.test(path)) return step("login", "Flipkart: please log in in this browser once.", true);
+  if (/\/p\/itm/.test(path)) return job.step === "start" ? flipkartProduct(job) : undefined;
+  if (/\/viewcart/.test(path)) {
+    const go = await find(fkBtn(/^place order$/i), 10000);
+    if (!go) return step("none", "Flipkart: cart open but no 'Place Order' button – finish in the tab. " + fkDiag(), true);
+    await step("placeorder", "Flipkart: cart – clicking 'Place Order'…");
+    realClick(go);
+    return;
+  }
+  if (job.step !== "start" || /\/(checkout|payments?)\b/.test(path)) return flipkartCheckout(job);
+}
+
+async function flipkartProduct(job) {
+  const buy = fkBtn(/^buy now$/i), add = fkBtn(/^add to cart$/i);
+  const btn = await find(() => buy() || add() || (textEl(FK_SOLD, "button, div, span") && "sold"), 12000);
+  if (!btn || btn === "sold")
+    return step("none", `Flipkart: ${btn ? "this card is sold out / coming soon" : "no Buy Now / Add to cart button " + fkDiag()} – check the tab.`, true);
+  // e-gift card: recipient email on the product page
+  const email = amzGiftEmailBox();
+  if (email && !email.value.trim()) {
+    const { amzGiftEmail } = await chrome.storage.local.get({ amzGiftEmail: "" });
+    if (!amzGiftEmail) return step("none", "Flipkart: this e-gift card needs a recipient email – set 'E-gift card email' in Options. Finish this one in the tab.", true);
+    email.focus(); setValue(email, amzGiftEmail); email.dispatchEvent(new Event("blur", { bubbles: true }));
+    await step("giftfilled", `Flipkart: e-gift card – recipient ${amzGiftEmail}`);
+  }
+  const isBuy = btn === buy();
+  await step(isBuy ? "buynow" : "added", `Flipkart: product page – clicking '${isBuy ? "Buy Now" : "Add to cart"}'…`);
+  realClick(btn);
+  // Flipkart can show "Buy now" for cards that can't actually be bought
+  const res = await find(() => (leaving || moved() ? "moved" : FK_CANT_BUY.test(document.body.innerText) ? "cant" : null), 8000);
+  if (res === "cant") return step("none", "Flipkart: Flipkart says this card can't be bought right now (listed, but not purchasable).", true);
+  if (!isBuy && res !== "moved") {
+    const go = await find(fkBtn(/^(go to cart|place order)$/i), 5000);
+    if (go) { await step("added", "Flipkart: added – going to the cart…"); realClick(go); }
+  }
+}
+
+async function flipkartCheckout(job) {
+  const o = await chrome.storage.local.get({ upiId: "" });
+  const seen = {};
+  for (const end = Date.now() + 3 * 60 * 1000; Date.now() < end && !moved() && !leaving;) {
+    const what = await find(() => {
+      if (fkLoginStep()) return "login";
+      if (FK_CANT_BUY.test(document.body.innerText)) return "cant";
+      if (/payment options|payment method|pay with/i.test(document.body.innerText) && fkUpiOption()) return "payment";
+      if (fkBtn(/^deliver here$/i)()) return "address";
+      if (fkBtn(/^(continue|accept (&|and) continue)$/i)() && /order summary/i.test(document.body.innerText)) return "summary";
+      return null;
+    }, 20000);
+    if (!what) return step("checkout", "Flipkart: checkout open – nothing recognised to click, finish it yourself. " + fkDiag(), true);
+    if ((seen[what] = (seen[what] || 0) + 1) > 3)
+      return step("checkout", `Flipkart: stuck at the ${what} step – finish it yourself. ` + fkDiag(), true);
+    if (what === "login") return step("login", "Flipkart: please log in in this browser once (checkout asks for your mobile number).", true);
+    if (what === "cant") return step("none", "Flipkart: Flipkart says this card can't be bought right now.", true);
+    if (what === "address") {
+      await step("address", "Flipkart: delivery address – clicking 'Deliver Here'…");
+      realClick(fkBtn(/^deliver here$/i)());
+    } else if (what === "summary") {
+      await step("summary", "Flipkart: order summary – clicking 'Continue'…");
+      realClick(fkBtn(/^(continue|accept (&|and) continue)$/i)());
+    } else if (what === "payment") {
+      return flipkartPayUpi(o);
+    }
+    await sleep(1200);                                 // let the next step open
+  }
+}
+
+async function flipkartPayUpi(o) {
+  await step("paying", "Flipkart: payment page – choosing UPI…");
+  const opt = fkUpiOption();
+  realClick(opt);
+  await sleep(600);
+  if (o.upiId) {
+    // "Your UPI ID" / "Enter UPI ID", then Verify, then Pay: the request goes to your UPI app
+    const idOpt = textEl(/^(your upi id|enter upi id|add new upi id|pay (by|using) upi id|upi id)$/i, "label, span, div, li");
+    if (idOpt) { realClick(idOpt.closest("label, li, [role=radio]") || idOpt); await sleep(400); }
+    const input = await find(() => [...document.querySelectorAll('input[type="text"], input[type="email"], input:not([type])')].find((i) => visible(i) && !i.disabled &&
+      /upi|vpa|@/i.test(fieldText(i, true)) && !/search/i.test(fieldText(i, false))), 8000);
+    if (input) {
+      input.focus(); setValue(input, o.upiId);
+      const verify = await find(fkBtn(/^verify$/i), 3000);
+      if (verify) { realClick(verify); await find(() => /verified|invalid|incorrect/i.test(document.body.innerText) || null, 6000); }
+      if (/invalid|incorrect/i.test(document.body.innerText))
+        return step("upi", `Flipkart: Flipkart didn't accept the UPI ID ${o.upiId} – check it in Options and pay yourself.`, true);
+      const pay = await find(fkBtn(/^pay\s*₹?\s*[\d,]*(\.\d+)?$/i), 8000);
+      if (pay) {
+        realClick(pay);                                  // only sends the request; you approve it with your PIN
+        return step("upi", `Flipkart: payment request sent to ${o.upiId} – approve it in your UPI app now.`, true);
+      }
+      return step("upi", "Flipkart: UPI ID filled – press Pay yourself. " + fkDiag(), true);
+    }
+  }
+  // no UPI ID saved: show the QR if Flipkart offers one
+  const qrOpt = textEl(/^(scan (and|&) pay|scan qr( code)?|pay (by|using|with) qr( code)?|show qr( code)?)$/i, "label, span, div, li, button");
+  if (qrOpt) {
+    realClick(qrOpt.closest("label, li, button, [role=radio], [role=button]") || qrOpt);
+    if (await find(() => highlightQr(), 15000)) {
+      const el = findQrEl();
+      const sent = el ? await sendQrToTelegram(el.parentElement || el) : false;
+      if (sent) watchPayment(false);
+      return step("qr", "Flipkart: QR is ready – scan it with your UPI app and enter your PIN." + (sent ? " (Telegram notified)" : ""), true);
+    }
+  }
+  return step("upi", "Flipkart: UPI chosen – pick your UPI app or enter your UPI ID and pay. " +
+                     "(Save your UPI ID in Options to have the request sent automatically.) " + fkDiag(), true);
+}
+
 // ---- Paytm payment page (GamesTheShop's gateway) ----
 function setValue(input, value) {
   const proto = Object.getPrototypeOf(input);
@@ -947,8 +1093,8 @@ async function watchPayment(baselineOk) {
 
 // ---- every finished order in a tab the extension opened → Telegram (any QR mode, also if you
 // finished checkout by hand). Only order-confirmation pages count, never product / cart / payment pages.
-const ORDER_DONE_URL = /\/(thankyou|thank-you|order-?success|order-?confirm(ation)?|payment-?success)\b|\/gp\/buy\/thankyou/i;
-const NOT_DONE_URL = /\/(dp|gp\/product|gp\/aw\/d|product|cart|gp\/cart|ap\/signin|login)\//i;
+const ORDER_DONE_URL = /\/(thankyou|thank-you|order-?success|order-?confirm(ation)?|payment-?success|orderresponse)\b|\/gp\/buy\/thankyou/i;
+const NOT_DONE_URL = /\/(dp|gp\/product|gp\/aw\/d|product|p\/itm\w+|viewcart|cart|gp\/cart|ap\/signin|login)\//i;
 // stricter than PAY_OK: e.g. a footer "thank you for shopping with us" must not count
 const PURCHASE_OK = /order (has been |was )?(placed|confirmed)( successfully)?|payment (was |is |has been )?successful|transaction successful|paid successfully|thank you for your (order|purchase)/i;
 let purchaseWatching = false;
@@ -1009,6 +1155,7 @@ async function getJob() {
     if (host === "www.gamestheshop.com") await gamestheshop(job);
     else if (host === "www.amazon.in") await amazon(job);
     else if (isPaytm) await paytm(job);
+    else if (host === "www.flipkart.com") await flipkart(job);
     // in-page navigation (Next.js / SPA): wait for the URL to change, then handle the new page
     const end = Date.now() + 60000;
     while (!moved() && Date.now() < end) await sleep(50);

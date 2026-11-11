@@ -1515,6 +1515,12 @@ class Controls:
             await self.tg.answer_callback(client, cq["id"], f"Request sent to {vpa}")
             await self.tg.send(client, f"📲 Payment request sent to <b>{html.escape(vpa)}</b> – approve it in your "
                                        "UPI app.", chat_ids=[cid])
+        elif act == "chk":
+            await self.tg.answer_callback(client, cq["id"], "Checking with GamesTheShop…")
+            try:
+                await gc.check_order_now(self.bot, client, key, [cid])
+            except gc.GtsError as e:
+                await self.tg.send(client, f"❔ {html.escape(str(e))}", chat_ids=[cid])
         else:
             await self.tg.answer_callback(client, cq["id"])
 

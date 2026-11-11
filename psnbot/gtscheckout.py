@@ -387,8 +387,10 @@ async def _pay_safe(bot, client, label, title, pay, chat_ids, secs=None):
     except GtsError as e:
         await bot.tg.send(client, f"⚠️ GamesTheShop · {_html.escape(label)} · {_html.escape(title)}: order placed, "
                                   f"but no QR – {_html.escape(str(e))}", chat_ids=chat_ids)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         log.exception("GamesTheShop QR failed")
+        await bot.tg.send(client, f"⚠️ GamesTheShop · {_html.escape(label)} · {_html.escape(title)}: order placed, "
+                                  f"but the QR step crashed – {_html.escape(repr(e))[:200]}", chat_ids=chat_ids)
 
 
 async def auto_checkout(bot, client, items) -> None:
@@ -398,12 +400,35 @@ async def auto_checkout(bot, client, items) -> None:
     per account), while each QR is fetched in the background so the first one arrives quickly."""
     import html as _html
     state = bot.state
-    accts = {l: a for l, a in accounts(state).items() if a.get("access")}
-    items = sorted([i for i in items if (i.extra or {}).get("product_id")],
-                   key=lambda i: -(i.denomination or 0))
-    if not accts or not items:
-        return
     owners = bot.users.recipients(admins_only=True)
+    accts = {l: a for l, a in accounts(state).items() if a.get("access")}
+    usable = sorted([i for i in items if (i.extra or {}).get("product_id")],
+                    key=lambda i: -(i.denomination or 0))
+    # remembered for /buy ("Last restock: …"), so a run that didn't work can be seen without logs
+    run = {"ts": time.time(), "cards": [i.title for i in items], "accounts": len(accts), "ok": 0, "errors": []}
+    state.settings["gts_last_run"] = run
+
+    def problem(text):
+        run["errors"].append(text)
+        task = asyncio.create_task(bot.tg.send(client, f"⚠️ <b>GamesTheShop auto-buy</b>: {_html.escape(text)}", chat_ids=owners))
+        bot._bg.add(task)
+        task.add_done_callback(bot._bg.discard)
+
+    if not accts:
+        problem("cards restocked, but no account is logged in. Open /buy → ➕ Add account.")
+        state.save()
+        return
+    if not usable:
+        problem(f"cards restocked, but the bot couldn't read their product id ({', '.join(i.title for i in items)[:150]}).")
+        state.save()
+        return
+    items = usable
+    log.info("GamesTheShop auto-buy: %d account(s) × %d card(s)", len(accts), len(items))
+    note = asyncio.create_task(bot.tg.send(client, f"🛒 <b>Auto-buy started</b>: {len(accts)} account{'s' if len(accts) != 1 else ''}"
+                                                   f" × {len(items)} card{'s' if len(items) != 1 else ''}. QRs follow…",
+                                           chat_ids=owners))
+    bot._bg.add(note)
+    note.add_done_callback(bot._bg.discard)
     recent = state.settings.setdefault("gts_recent", {})          # "label|variant" -> ts
     now = time.time()
     for k in [k for k, t in recent.items() if now - t > COOLDOWN]:
@@ -419,11 +444,15 @@ async def auto_checkout(bot, client, items) -> None:
             try:
                 pay = await checkout(client, state, acc, it)
             except GtsError as e:
-                await bot.tg.send(client, f"⚠️ GamesTheShop auto-buy · {_html.escape(label)} · "
-                                          f"{_html.escape(it.title)}: {_html.escape(str(e))}", chat_ids=owners)
+                problem(f"{label} · {it.title}: {e}")
                 if "login expired" in str(e):
                     return                                        # no point trying the other cards
                 continue
+            except Exception as e:  # noqa: BLE001 - never fail silently: tell the owner what broke
+                log.exception("GamesTheShop auto-buy crashed for %s / %s", label, it.title)
+                problem(f"{label} · {it.title}: unexpected error {e!r}"[:300])
+                continue
+            run["ok"] += 1
             secs = time.time() - c0
             log.info("GamesTheShop: %s ordered %s in %.1fs (%s)", label, it.title, secs, pay.get("paytmOrderId"))
             task = asyncio.create_task(_pay_safe(bot, client, label, it.title, pay, owners, secs=secs))

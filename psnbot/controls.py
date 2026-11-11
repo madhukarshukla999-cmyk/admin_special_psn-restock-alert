@@ -1221,6 +1221,17 @@ class Controls:
             lines.append(f"• {html.escape(label)} — {state}")
         if on and not logged:
             lines += ["", "⚠️ Auto-buy is on, but no account is logged in yet."]
+        last = st.settings.get("gts_last_run")
+        if last:
+            cards = ", ".join(last.get("cards") or [])[:120] or "?"
+            lines += ["", f"<b>Last restock</b> ({_ago(last.get('ts'))}): {html.escape(cards)}"]
+            if last.get("off"):
+                lines.append("⏸ Auto-buy was OFF, so nothing was ordered.")
+            else:
+                lines.append(f"🛒 {last.get('accounts', 0)} account(s) · ✅ {last.get('ok', 0)} order(s) placed"
+                             + (f" · ❌ {len(last.get('errors') or [])} problem(s)" if last.get("errors") else ""))
+                for e in (last.get("errors") or [])[:4]:
+                    lines.append(f"   • {html.escape(e)[:160]}")
         rows = [[{"text": "⏸ Turn auto-buy OFF" if on else "🟢 Turn auto-buy ON", "callback_data": "gb:tog"}],
                 [{"text": "➕ Add account", "callback_data": "gb:add"}]]
         links = self._test_links()

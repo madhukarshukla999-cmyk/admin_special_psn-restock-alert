@@ -555,6 +555,9 @@ class Bot:
                     task = asyncio.create_task(gtscheckout.auto_checkout(self, client, owner_wants))
                     self._bg.add(task)
                     task.add_done_callback(self._bg.discard)
+                else:                               # shown in /buy, so a missed restock is explained
+                    self.state.settings["gts_last_run"] = {"ts": time.time(), "cards": [i.title for i in owner_wants],
+                                                           "off": True}
             if (owner_wants and self.cfg.get("extension_push", True) and not self.tg.dry_run
                     and not extension_push.paused(self.state)):
                 # laptop extension first: it's the fastest path to checkout

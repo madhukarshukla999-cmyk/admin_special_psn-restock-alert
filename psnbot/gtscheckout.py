@@ -332,12 +332,15 @@ def qr_png(data: str) -> bytes | None:
     return buf.getvalue()
 
 
-async def send_photo(client, token: str, chat_id: str, png: bytes, caption: str) -> int | None:
+async def send_photo(client, token: str, chat_id: str, png: bytes, caption: str, reply_markup: dict | None = None) -> int | None:
     """Telegram sendPhoto (multipart). Returns the message id."""
+    import json as _json
+    data = {"chat_id": chat_id, "caption": caption[:1024], "parse_mode": "HTML"}
+    if reply_markup:
+        data["reply_markup"] = _json.dumps(reply_markup)
     try:
         r = await client.post(f"https://api.telegram.org/bot{token}/sendPhoto",
-                              data={"chat_id": chat_id, "caption": caption[:1024], "parse_mode": "HTML"},
-                              files={"photo": ("qr.png", png, "image/png")}, timeout=30)
+                              data=data, files={"photo": ("qr.png", png, "image/png")}, timeout=30)
         j = r.json()
         return (j.get("result") or {}).get("message_id") if j.get("ok") else None
     except Exception as e:  # noqa: BLE001
@@ -345,34 +348,147 @@ async def send_photo(client, token: str, chat_id: str, png: bytes, caption: str)
         return None
 
 
+# Open payments (not paid, not cancelled, not expired), so the buttons under a QR can act on them.
+# Kept in memory only: the Paytm token is short-lived and shouldn't be stored.
+PENDING: dict[str, dict] = {}
+
+
+def upi_id(state) -> str:
+    return str(state.settings.get("gts_upi_id") or "").strip()
+
+
+def pay_mode(state) -> str:
+    """'qr' (QR in DM) or 'upi' (payment request to your UPI ID, QR as a backup)."""
+    m = state.settings.get("gts_pay_mode")
+    return m if m in ("qr", "upi") and (m != "upi" or upi_id(state)) else "qr"
+
+
+async def paytm_upi_collect(pay: dict, vpa: str) -> str:
+    """Ask Paytm to send a payment request (UPI collect) for this order to `vpa`. Returns Paytm's
+    status text on success; raises GtsError with Paytm's reason otherwise."""
+    if AsyncSession is None:
+        raise GtsError("curl_cffi isn't installed (pip install curl_cffi)")
+    mid, oid, tok = pay.get("mid"), pay.get("paytmOrderId"), pay.get("txnToken")
+    if not (mid and oid and tok):
+        raise GtsError("checkout didn't return a Paytm token")
+    body = {"head": {"channelId": "WAP", "txnToken": tok},
+            "body": {"requestType": "NATIVE", "mid": mid, "orderId": oid, "paymentMode": "UPI",
+                     "payerAccount": vpa}}
+    kw = {"proxy": _proxy()} if _proxy() else {}
+    last = "no reply"
+    for host in PAYTM_HOSTS:                          # one host at a time: never two requests at once
+        try:
+            async with AsyncSession(impersonate="chrome", **kw) as s:
+                r = await s.post(f"{host}/theia/api/v1/processTransaction", params={"mid": mid, "orderId": oid},
+                                 json=body, headers={"Content-Type": "application/json"}, timeout=8)
+            d = r.json()
+        except Exception as e:  # noqa: BLE001
+            last = f"{host}: {e!r}"
+            continue
+        b = d.get("body") or {}
+        info, txn = b.get("resultInfo") or {}, b.get("txnInfo") or {}
+        status = str(info.get("resultStatus") or "").upper()
+        msg = txn.get("RESPMSG") or info.get("resultMsg") or ""
+        if status in ("S", "P", "PENDING") or str(info.get("resultCode")) in ("0000", "400", "402"):
+            return msg or "request sent"
+        last = msg or str(d)[:160]
+        if status == "F":
+            break                                     # a real refusal: the other host would say the same
+    raise GtsError(f"Paytm didn't send the UPI request: {last}")
+
+
+def _pay_buttons(key: str, vpa: str) -> dict:
+    row = [{"text": "❌ Cancel", "callback_data": f"gp:x:{key}"}]
+    if vpa:
+        row.insert(0, {"text": "📲 Send to my UPI ID", "callback_data": f"gp:upi:{key}"})
+    return {"inline_keyboard": [row]}
+
+
 async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: list[str], secs: float | None = None) -> str:
-    """Send the order's UPI QR (or the UPI link if no QR library) to the owner. Returns a status line.
+    """Send the order's payment to the owner: a UPI request to their UPI ID (pay mode 'upi') and/or
+    the UPI QR, with ❌ Cancel / 📲 Send to my UPI ID buttons. Returns a status line.
     `secs` = how long the order took, shown in the caption so we can see the real speed."""
     import html as _html
-    link = await paytm_upi_link(pay)
+    import secrets
+    state = bot.state
+    vpa = upi_id(state)
     amount = pay.get("amount") or "?"
     minutes = QR_MINUTES
     speed = f"⚡ Ordered in {secs:.1f}s\n" if secs is not None else ""
-    caption = (f"💳 <b>GamesTheShop</b> · {_html.escape(title)}\n"
-               f"👤 Account: {_html.escape(label)}\n"
-               f"💰 ₹{_html.escape(str(amount))} · 🧾 {_html.escape(str(pay.get('paytmOrderId', ''))[:40])}\n"
-               f"{speed}\n"
-               f"⏳ Pay within ~{minutes} min. Scan with any UPI app and enter your PIN.\n"
-               "Same phone: save the image → UPI app → Scan QR → gallery.")
-    png = qr_png(link)
+    head = (f"💳 <b>GamesTheShop</b> · {_html.escape(title)}\n"
+            f"👤 Account: {_html.escape(label)}\n"
+            f"💰 ₹{_html.escape(str(amount))} · 🧾 {_html.escape(str(pay.get('paytmOrderId', ''))[:40])}\n"
+            f"{speed}")
+
+    requested = ""
+    if pay_mode(state) == "upi":                      # UPI request first: no scanning needed
+        try:
+            await paytm_upi_collect(pay, vpa)
+            requested = f"📲 <b>Payment request sent to {_html.escape(vpa)}</b> – approve it in your UPI app.\n"
+        except GtsError as e:
+            requested = f"⚠️ UPI request failed ({_html.escape(str(e))[:120]}). Use the QR instead.\n"
+
+    try:
+        link = await paytm_upi_link(pay)
+    except GtsError:
+        if requested.startswith("📲"):               # the request already went out; no QR is fine
+            link = ""
+        else:
+            raise
+    key = secrets.token_hex(4)
+    PENDING[key] = {**pay, "label": label, "title": title, "chat": [], "ts": time.time(),
+                    "requested": requested.startswith("📲")}
+    kb = _pay_buttons(key, "" if requested.startswith("📲") else vpa)
+    caption = (head + "\n" + requested +
+               (f"⏳ Pay within ~{minutes} min. Scan with any UPI app and enter your PIN.\n"
+                "Same phone: save the image → UPI app → Scan QR → gallery." if link else
+                f"⏳ Approve within ~{minutes} min."))
+    png = qr_png(link) if link else None
     sent = []
     for cid in chat_ids:
-        mid = await send_photo(client, bot.tg.token, cid, png, caption) if png else None
+        mid = await send_photo(client, bot.tg.token, cid, png, caption, kb) if png else None
         if mid:
-            sent.append((cid, mid))
-        else:                                       # no QR library / photo failed: send the link as text
-            await bot.tg.send(client, caption.split("\n\n")[0] + "\n\nUPI payment link (copy into your UPI app):\n"
-                              f"<code>{_html.escape(link)}</code>", chat_ids=[cid])
-    for cid, mid in sent:                          # delete the QR once it can't be paid any more
-        async def drop(cid=cid, mid=mid):
+            sent.append((cid, mid, "photo"))
+            continue
+        text = caption + (f"\n\nUPI payment link (copy into your UPI app):\n<code>{_html.escape(link)}</code>" if link else "")
+        res = await bot.tg.api(client, "sendMessage", {"chat_id": cid, "text": text, "parse_mode": "HTML",
+                                                       "disable_web_page_preview": True, "reply_markup": kb})
+        if res and res.get("message_id"):
+            sent.append((cid, res["message_id"], "text"))
+    PENDING[key]["chat"] = sent
+
+    async def expire():                              # delete it once it can't be paid any more
+        if PENDING.pop(key, None) is None:
+            return                                   # already cancelled
+        for cid, mid, _ in sent:
             await bot.tg.api(client, "deleteMessage", {"chat_id": cid, "message_id": mid})
-        bot._later(minutes * 60, drop())
-    return "QR sent to your DM" if sent else "UPI link sent to your DM"
+    bot._later(minutes * 60, expire())
+    if requested.startswith("📲"):
+        return f"UPI request sent to {vpa}" + (" + QR" if png else "")
+    return "QR sent to your DM" if png else "UPI link sent to your DM"
+
+
+async def cancel_payment(bot, client, key: str) -> dict | None:
+    """❌ Cancel under a QR: remove it from Telegram now. The unpaid GamesTheShop order just expires."""
+    p = PENDING.pop(key, None)
+    if not p:
+        return None
+    for cid, mid, _ in p.get("chat", []):
+        await bot.tg.api(client, "deleteMessage", {"chat_id": cid, "message_id": mid})
+    return p
+
+
+async def request_payment(bot, key: str) -> str:
+    """📲 Send to my UPI ID under a QR. Returns the UPI ID used."""
+    p = PENDING.get(key)
+    if not p:
+        raise GtsError("this payment has expired or was cancelled")
+    vpa = upi_id(bot.state)
+    if not vpa:
+        raise GtsError("set your UPI ID first: /buy → 💳 UPI ID")
+    await paytm_upi_collect(p, vpa)
+    p["requested"] = True
+    return vpa
 
 
 # -- several cards for one account, in parallel ------------------------------------------------

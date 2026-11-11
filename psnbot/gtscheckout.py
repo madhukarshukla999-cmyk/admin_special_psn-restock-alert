@@ -129,6 +129,8 @@ async def _verify_otp(session, state, label: str, mobile: str, otp: str) -> dict
         raise GtsError(data.get("message") or f"wrong or expired OTP (HTTP {r.status_code})")
     acc = accounts(state).setdefault(label, {})
     acc.update(mobile=mobile, access=access, refresh=refresh, pending_otp=False, added=time.time())
+    acc.pop("expired", None)                       # a fresh login clears the watchdog's flag
+    acc.pop("expired_told", None)
     state.save()                                   # save the login first, so a profile hiccup can't lose it
     # fill in user_id (needed for the cart call), reusing the same connection as the verify call
     try:
@@ -613,6 +615,8 @@ async def auto_checkout(bot, client, items) -> None:
         async def done(it, pay, err, secs):
             if err is not None:
                 problem(f"{label} · {it.title}: {err}")
+                if "login expired" in str(err):
+                    await mark_expired(bot, client, label)       # re-login button for next time
                 return
             run["ok"] += 1
             log.info("GamesTheShop: %s ordered %s in %.1fs (%s)", label, it.title, secs, pay.get("paytmOrderId"))
@@ -625,3 +629,90 @@ async def auto_checkout(bot, client, items) -> None:
 
     await asyncio.gather(*(one_account(l, a) for l, a in accts.items()))
     state.save()
+
+
+# -- login watchdog: find expired logins before a restock does -------------------------------
+LOGIN_CHECK_EVERY = 30 * 60
+# The login returns access + refresh JWTs (Django SimpleJWT style). These are the usual refresh
+# addresses for that; if none works, the owner is asked to log in again with an OTP.
+REFRESH_PATHS = ("/auth/token/refresh/", "/auth/refresh/")
+
+
+async def _try_refresh(acc: dict) -> bool:
+    """Get a new access key with the refresh key, silently. True if it worked."""
+    if not acc.get("refresh"):
+        return False
+    for path in REFRESH_PATHS:
+        try:
+            r = await _post(None, path, json={"refresh": acc["refresh"]})
+        except GtsError:
+            continue
+        if r.status_code in (200, 201):
+            try:
+                d = r.json()
+            except ValueError:
+                continue
+            if d.get("access"):
+                acc["access"] = d["access"]
+                if d.get("refresh"):
+                    acc["refresh"] = d["refresh"]
+                log.info("GamesTheShop: login refreshed via %s", path)
+                return True
+    return False
+
+
+async def check_login(acc: dict) -> str:
+    """'ok', 'expired', or 'unknown' (network / server trouble: not the login's fault)."""
+    try:
+        r = await _get(None, "/customer/profile", headers=_auth(acc))
+    except GtsError:
+        return "unknown"
+    if r.status_code == 200:
+        return "ok"
+    if r.status_code in (401, 403):
+        if await _try_refresh(acc):
+            try:
+                r2 = await _get(None, "/customer/profile", headers=_auth(acc))
+                if r2.status_code == 200:
+                    return "ok"
+            except GtsError:
+                return "unknown"
+        return "expired"
+    return "unknown"
+
+
+async def mark_expired(bot, client, label: str) -> None:
+    """Flag an account and tell the owner once, with a one-tap re-login button."""
+    import html as _html
+    acc = accounts(bot.state).get(label)
+    if not acc:
+        return
+    acc["expired"] = True
+    if acc.get("expired_told"):
+        return
+    acc["expired_told"] = time.time()
+    bot.state.save()
+    await bot.tg.send(client, f"🔑 <b>GamesTheShop login expired</b> for <b>{_html.escape(label)}</b>.\n"
+                              "Auto-buy can't order with this account until you log in again. "
+                              "Tap below: an OTP goes to its mobile number.",
+                      chat_ids=bot.users.recipients(admins_only=True),
+                      reply_markup={"inline_keyboard": [[{"text": f"🔑 Log in {label} again"[:40],
+                                                          "callback_data": f"gb:relogin:{label}"[:64]}]]})
+
+
+async def check_logins(bot, client) -> dict:
+    """Check every logged-in account once. Returns {label: status}."""
+    out = {}
+    for label, acc in list(accounts(bot.state).items()):
+        if not acc.get("access"):
+            continue
+        status = await check_login(acc)
+        out[label] = status
+        if status == "ok":
+            acc.pop("expired", None)                  # working again (e.g. refreshed)
+            acc.pop("expired_told", None)
+            acc["checked"] = time.time()
+        elif status == "expired":
+            await mark_expired(bot, client, label)
+    bot.state.save()
+    return out

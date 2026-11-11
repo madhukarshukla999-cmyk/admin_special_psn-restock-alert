@@ -1224,7 +1224,7 @@ class Controls:
         for label, a in accts.items():
             state = "⏳ waiting for OTP" if a.get("pending_otp") and not a.get("access") else \
                     "✅ ready" if a.get("access") else "❌ not logged in"
-            lines.append(f"• {html.escape(label)} — {state}")
+            lines.append(f"• {html.escape(label)} — {state} · {self._acc_pay_short(label)}")
         if on and not logged:
             lines += ["", "⚠️ Auto-buy is on, but no account is logged in yet."]
         last = st.settings.get("gts_last_run")
@@ -1239,15 +1239,15 @@ class Controls:
                 for e in (last.get("errors") or [])[:4]:
                     lines.append(f"   • {html.escape(e)[:160]}")
         vpa, mode = gc.upi_id(st), gc.pay_mode(st)
-        lines += ["", "<b>Payment</b>",
-                  ("📲 A payment request goes to your UPI ID <b>" + html.escape(vpa) + "</b>; the QR comes too as a backup."
+        lines += ["", "<b>Payment – default for all accounts</b> (tap ⚙️ on an account to change just that one)",
+                  ("📲 A payment request goes to <b>" + html.escape(vpa) + "</b>; the QR comes too as a backup."
                    if mode == "upi" else "📷 You get a QR to scan" + (f" (UPI ID {html.escape(vpa)} saved for the 📲 button)." if vpa else "."))]
         open_n = len(gc.PENDING)
         if open_n:
             lines.append(f"🧾 {open_n} payment{'s' if open_n != 1 else ''} waiting.")
         rows = [[{"text": "⏸ Turn auto-buy OFF" if on else "🟢 Turn auto-buy ON", "callback_data": "gb:tog"}],
-                [{"text": "💳 Pay by: " + ("📲 UPI request" if mode == "upi" else "📷 QR"), "callback_data": "gb:pm"},
-                 {"text": "✏️ UPI ID" + (f": {vpa}" if vpa else ""), "callback_data": "gb:upi"}],
+                [{"text": "💳 Default: " + ("📲 UPI request" if mode == "upi" else "📷 QR"), "callback_data": "gb:pm"},
+                 {"text": "✏️ Default UPI ID" + (f": {vpa}" if vpa else ""), "callback_data": "gb:upi"}],
                 [{"text": "➕ Add account", "callback_data": "gb:add"}]]
         if open_n:
             rows.append([{"text": f"❌ Cancel all waiting payments ({open_n})", "callback_data": "gb:xall"}])
@@ -1257,9 +1257,46 @@ class Controls:
                         + ([{"text": f"🧪 Test: {len(links)} orders", "callback_data": f"gb:t?:{len(links)}"}]
                            if len(links) > 1 else []))
         rows.append([{"text": "🔗 Test another link", "callback_data": "gb:test"}])
-        for label in list(accts)[:8]:
-            rows.append([{"text": f"🗑 Remove {label}"[:40], "callback_data": f"gb:rm?:{label}"[:64]}])
+        acc_btns = [{"text": f"⚙️ {label}"[:40], "callback_data": f"gb:acc:{label}"[:64]} for label in list(accts)[:8]]
+        rows += [acc_btns[i:i + 2] for i in range(0, len(acc_btns), 2)]
         rows.append([{"text": "🔄 Refresh", "callback_data": "gb:home"}])
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    def _acc_pay_short(self, label: str) -> str:
+        from . import gtscheckout as gc
+        st = self.bot.state
+        own = (gc.accounts(st).get(label) or {})
+        mode, vpa = gc.pay_mode(st, label), gc.upi_id(st, label)
+        txt = f"📲 UPI {vpa}" if mode == "upi" else "📷 QR"
+        return txt + ("" if own.get("pay_mode") in ("qr", "upi") or own.get("upi_id") else " (default)")
+
+    def _buy_acc_view(self, label: str, note: str = "") -> tuple[str, dict]:
+        """⚙️ one account: its own UPI ID and payment method (or the defaults), remove."""
+        from . import gtscheckout as gc
+        st = self.bot.state
+        a = gc.accounts(st).get(label) or {}
+        own_vpa, own_mode = str(a.get("upi_id") or ""), a.get("pay_mode")
+        mode, vpa = gc.pay_mode(st, label), gc.upi_id(st, label)
+        state = "✅ logged in" if a.get("access") else "⏳ waiting for OTP" if a.get("pending_otp") else "❌ not logged in"
+        lines = [f"⚙️ <b>Account {html.escape(label)}</b>", ""]
+        if note:
+            lines += [note, ""]
+        lines += [f"Login: {state}",
+                  "UPI ID: " + (f"<b>{html.escape(own_vpa)}</b> (this account)" if own_vpa else
+                                (f"{html.escape(vpa)} (default)" if vpa else "none")),
+                  "Pay by: " + {"qr": "📷 QR", "upi": "📲 UPI request"}.get(own_mode, "default") +
+                  f" → now <b>{'📲 request to ' + html.escape(vpa) if mode == 'upi' else '📷 QR'}</b>"]
+        if own_mode == "upi" and not vpa:
+            lines.append("⚠️ UPI request needs a UPI ID, so this account gets a QR until you set one.")
+        nxt = {None: "qr", "qr": "upi", "upi": None}[own_mode if own_mode in ("qr", "upi") else None]
+        nxt_txt = {"qr": "📷 QR", "upi": "📲 UPI request", None: "default"}[nxt]
+        rows = [[{"text": f"💳 Pay by: {({'qr': '📷 QR', 'upi': '📲 UPI request'}.get(own_mode, 'default'))} → {nxt_txt}",
+                  "callback_data": f"gb:apm:{label}"[:64]}],
+                [{"text": "✏️ UPI ID for this account", "callback_data": f"gb:aupi:{label}"[:64]}]]
+        if own_vpa:
+            rows.append([{"text": "↩ Use the default UPI ID", "callback_data": f"gb:aupirm:{label}"[:64]}])
+        rows += [[{"text": f"🗑 Remove {label}"[:40], "callback_data": f"gb:rm?:{label}"[:64]}],
+                 [{"text": "⬅ All accounts", "callback_data": "gb:home"}]]
         return "\n".join(lines), {"inline_keyboard": rows}
 
     def _test_links(self) -> list[str]:
@@ -1298,6 +1335,36 @@ class Controls:
             await self.tg.edit(client, cid, mid, "📱 <b>Add a GamesTheShop account</b>\n\n"
                                "Type the account's <b>mobile number</b> here (10 digits) and send it.\n"
                                "GamesTheShop will text it an OTP.", self._ask_markup())
+            return
+        elif act in ("acc", "apm", "aupi", "aupirm") and arg in accts:
+            a = accts[arg]
+            if act == "aupi":
+                self._ask[cid] = {"kind": "upi", "label": arg, "ts": time.time()}
+                await self.tg.answer_callback(client, cq["id"])
+                await self.tg.edit(client, cid, mid, f"✏️ <b>UPI ID for {html.escape(arg)}</b>"
+                                   + (f"\nNow: <code>{html.escape(a['upi_id'])}</code>" if a.get("upi_id") else "") +
+                                   "\n\nType the UPI ID for this account (e.g. <code>name@okicici</code>) and send it.",
+                                   self._ask_markup())
+                return
+            note = ""
+            if act == "apm":
+                cur = a.get("pay_mode") if a.get("pay_mode") in ("qr", "upi") else None
+                nxt = {None: "qr", "qr": "upi", "upi": None}[cur]
+                if nxt:
+                    a["pay_mode"] = nxt
+                else:
+                    a.pop("pay_mode", None)
+                st.save()
+                note = "Saved."
+                if nxt == "upi" and not gc.upi_id(st, arg):
+                    note = "⚠️ Set a UPI ID for this account (or a default one) for UPI requests to work."
+            elif act == "aupirm":
+                a.pop("upi_id", None)
+                st.save()
+                note = "↩ This account now uses the default UPI ID."
+            await self.tg.answer_callback(client, cq["id"], "Saved" if act != "acc" else "")
+            text, kb = self._buy_acc_view(arg, note)
+            await self.tg.edit(client, cid, mid, text, kb)
             return
         elif act == "pm":
             if not gc.upi_id(st):
@@ -1385,7 +1452,7 @@ class Controls:
             await self.tg.edit(client, cid, mid, f"🗑 Remove <b>{html.escape(arg)}</b> from auto-buy?\n"
                                "Its saved login is deleted from the bot.",
                                {"inline_keyboard": [[{"text": "Yes, remove", "callback_data": f"gb:rm!:{arg}"[:64]},
-                                                     {"text": "Cancel", "callback_data": "gb:home"}]]})
+                                                     {"text": "Cancel", "callback_data": f"gb:acc:{arg}"[:64]}]]})
             return
         elif act == "rm!" and arg in accts:
             accts.pop(arg)
@@ -1478,6 +1545,13 @@ class Controls:
             if not _re.fullmatch(r"[A-Za-z0-9._\-]{2,256}@[A-Za-z][A-Za-z0-9.\-]{1,63}", vpa):
                 await send("That doesn't look like a UPI ID. It looks like <code>name@okicici</code> or "
                            "<code>9876543210@ybl</code>.", reply_markup=self._ask_markup())
+                return
+            if ask.get("label") and ask["label"] in accts:          # this account only
+                accts[ask["label"]]["upi_id"] = vpa
+                st.save()
+                self._ask.pop(cid, None)
+                t, kb = self._buy_acc_view(ask["label"], f"✅ UPI ID saved for this account: <b>{html.escape(vpa)}</b>")
+                await send(t, reply_markup=kb)
                 return
             st.settings["gts_upi_id"] = vpa
             if ask.get("then_mode"):

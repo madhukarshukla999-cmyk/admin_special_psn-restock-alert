@@ -353,14 +353,18 @@ async def send_photo(client, token: str, chat_id: str, png: bytes, caption: str,
 PENDING: dict[str, dict] = {}
 
 
-def upi_id(state) -> str:
-    return str(state.settings.get("gts_upi_id") or "").strip()
+def upi_id(state, label: str | None = None) -> str:
+    """The account's own UPI ID if it has one, else the default UPI ID (or '')."""
+    own = str((accounts(state).get(label) or {}).get("upi_id") or "").strip() if label else ""
+    return own or str(state.settings.get("gts_upi_id") or "").strip()
 
 
-def pay_mode(state) -> str:
-    """'qr' (QR in DM) or 'upi' (payment request to your UPI ID, QR as a backup)."""
-    m = state.settings.get("gts_pay_mode")
-    return m if m in ("qr", "upi") and (m != "upi" or upi_id(state)) else "qr"
+def pay_mode(state, label: str | None = None) -> str:
+    """'qr' (QR in DM) or 'upi' (payment request to the UPI ID, QR as a backup).
+    An account can override the default ('qr' / 'upi'); 'upi' needs a UPI ID, else it's 'qr'."""
+    own = (accounts(state).get(label) or {}).get("pay_mode") if label else None
+    m = own if own in ("qr", "upi") else state.settings.get("gts_pay_mode")
+    return m if m in ("qr", "upi") and (m != "upi" or upi_id(state, label)) else "qr"
 
 
 async def paytm_upi_collect(pay: dict, vpa: str) -> str:
@@ -411,7 +415,7 @@ async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: li
     import html as _html
     import secrets
     state = bot.state
-    vpa = upi_id(state)
+    vpa = upi_id(state, label)                        # this account's UPI ID (or the default)
     amount = pay.get("amount") or "?"
     minutes = QR_MINUTES
     speed = f"⚡ Ordered in {secs:.1f}s\n" if secs is not None else ""
@@ -421,7 +425,7 @@ async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: li
             f"{speed}")
 
     requested = ""
-    if pay_mode(state) == "upi":                      # UPI request first: no scanning needed
+    if pay_mode(state, label) == "upi":               # UPI request first: no scanning needed
         try:
             await paytm_upi_collect(pay, vpa)
             requested = f"📲 <b>Payment request sent to {_html.escape(vpa)}</b> – approve it in your UPI app.\n"
@@ -483,9 +487,9 @@ async def request_payment(bot, key: str) -> str:
     p = PENDING.get(key)
     if not p:
         raise GtsError("this payment has expired or was cancelled")
-    vpa = upi_id(bot.state)
+    vpa = upi_id(bot.state, p.get("label"))
     if not vpa:
-        raise GtsError("set your UPI ID first: /buy → 💳 UPI ID")
+        raise GtsError("set a UPI ID first: /buy → ⚙️ account → ✏️ UPI ID")
     await paytm_upi_collect(p, vpa)
     p["requested"] = True
     return vpa

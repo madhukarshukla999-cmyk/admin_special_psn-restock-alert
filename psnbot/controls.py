@@ -1347,9 +1347,7 @@ class Controls:
                            reply_markup=self._ask_markup())
                 return
             self._ask.pop(cid, None)
-            n_acc = sum(1 for a in accts.values() if a.get("access"))
-            await send(f"⏳ Placing test orders: {n_acc} account{'s' if n_acc != 1 else ''} × {len(links)} card"
-                       f"{'s' if len(links) != 1 else ''}. Each QR arrives as soon as it's ready…")
+            await send(f"⏳ Placing {len(links)} test order{'s' if len(links) != 1 else ''}…")
             result = await self._gtsbuy_command(client, ["test", *links], cid)
             await send(result, reply_markup={"inline_keyboard": [[{"text": "⬅ Back to auto-buy", "callback_data": "gb:home"}]]})
 
@@ -1434,31 +1432,20 @@ class Controls:
             logged = [l for l, a in accts.items() if a.get("access")]
             if not logged:
                 return "No logged-in account. Add one with <code>/gtsbuy add &lt;mobile&gt;</code> first."
-
-            async def run_account(label):
-                """Like a real restock: one order per card; each QR is sent the moment it's ready."""
-                out = []
-                for it in items:
-                    t0 = time.time()
-                    try:
-                        res = await gc.checkout(client, self.bot.state, accts[label], it)
-                    except gc.GtsError as e:
-                        out.append(f"❌ {html.escape(label)} · {it.title}: {html.escape(str(e))}")
-                        if "login expired" in str(e):
-                            break
-                        continue
-                    secs = time.time() - t0
-                    try:
-                        await gc.pay_to_dm(self.bot, client, label, it.title, res, [str(cid)], secs=secs)
-                        out.append(f"✅ {html.escape(label)} · {it.title}: ₹{res.get('amount')} – QR sent ({secs:.1f}s)")
-                    except gc.GtsError as e:
-                        out.append(f"⚠️ {html.escape(label)} · {it.title}: order placed, but no QR: {html.escape(str(e))}")
-                return out
-
-            results = await asyncio.gather(*(run_account(l) for l in logged))   # all accounts at once
-            lines = [line for r in results for line in r]
-            return (f"<b>Test: {len(logged)} account{'s' if len(logged) != 1 else ''} × {len(items)} card"
-                    f"{'s' if len(items) != 1 else ''}</b>\n" + "\n".join(lines) +
+            label = logged[0]
+            lines = []
+            for it in items:                                  # one order per card, like a real restock
+                try:
+                    res = await gc.checkout(client, self.bot.state, accts[label], it)
+                except gc.GtsError as e:
+                    lines.append(f"❌ {it.title}: {html.escape(str(e))}")
+                    continue
+                try:
+                    how = await gc.pay_to_dm(self.bot, client, label, it.title, res, [str(cid)])
+                    lines.append(f"✅ {it.title}: ₹{res.get('amount')} – {how}")
+                except gc.GtsError as e:
+                    lines.append(f"⚠️ {it.title}: order placed, payment step failed: {html.escape(str(e))}")
+            return (f"<b>Test with {html.escape(label)}</b>\n" + "\n".join(lines) +
                     "\n\n<b>These are real orders:</b> only scan a QR if you want to buy. Unpaid, they expire by themselves.")
 
         return ("🛒 <b>GamesTheShop auto-buy</b> (owner)\n"

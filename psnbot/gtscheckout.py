@@ -375,6 +375,53 @@ async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: li
     return "QR sent to your DM" if sent else "UPI link sent to your DM"
 
 
+# -- several cards for one account, in parallel ------------------------------------------------
+async def order_cards(client, state, acc: dict, items: list, on_result) -> None:
+    """Order every card for one account AT THE SAME TIME. `await on_result(item, pay, error, secs)`
+    is called as soon as each card is done, so its QR can go out straight away.
+
+    GamesTheShop's buy-now cart belongs to the account, so parallel orders could step on each
+    other. The order request names its own card, so they usually don't; any card whose parallel
+    attempt fails (except an expired login) is retried once on its own, one after another, which
+    is the order the website itself uses."""
+    async def attempt(it):
+        t0 = time.time()
+        try:
+            pay = await checkout(client, state, acc, it)
+            await on_result(it, pay, None, time.time() - t0)
+            return None
+        except GtsError as e:
+            return (it, e, time.time() - t0)
+        except Exception as e:  # noqa: BLE001
+            log.exception("GamesTheShop order crashed for %s", getattr(it, "title", "?"))
+            return (it, GtsError(f"unexpected error {e!r}"[:200]), time.time() - t0)
+
+    failed = [f for f in await asyncio.gather(*(attempt(i) for i in items)) if f]
+    if not failed:
+        return
+    if any("login expired" in str(e) for _, e, _ in failed):
+        for it, e, secs in failed:
+            await on_result(it, None, e, secs)
+        return
+    if len(items) > 1:
+        log.info("GamesTheShop: %d of %d parallel orders failed, retrying them one by one", len(failed), len(items))
+    for it, first_err, _ in failed:                  # retry one by one (and only if it ran in parallel)
+        if len(items) == 1:
+            await on_result(it, None, first_err, 0.0)
+            continue
+        t0 = time.time()
+        try:
+            pay = await checkout(client, state, acc, it)
+            await on_result(it, pay, None, time.time() - t0)
+        except GtsError as e:
+            await on_result(it, None, e, time.time() - t0)
+            if "login expired" in str(e):
+                return
+        except Exception as e:  # noqa: BLE001
+            log.exception("GamesTheShop order retry crashed")
+            await on_result(it, None, GtsError(f"unexpected error {e!r}"[:200]), time.time() - t0)
+
+
 # -- automatic checkout on restock -------------------------------------------------------------
 def auto_on(state) -> bool:
     return bool(state.settings.get("gts_auto"))
@@ -396,8 +443,8 @@ async def _pay_safe(bot, client, label, title, pay, chat_ids, secs=None):
 async def auto_checkout(bot, client, items) -> None:
     """A restock with one or more cards: every logged-in account places ONE ORDER PER CARD
     (highest value first) and each order's QR goes to the owner's DM as soon as it's ready.
-    Accounts run in parallel; within an account the orders go one after another (buy-now cart is
-    per account), while each QR is fetched in the background so the first one arrives quickly."""
+    Every account and every card runs at the same time (see order_cards for the safety retry);
+    each QR is fetched in the background so the first one arrives quickly."""
     import html as _html
     state = bot.state
     owners = bot.users.recipients(admins_only=True)
@@ -435,29 +482,26 @@ async def auto_checkout(bot, client, items) -> None:
         recent.pop(k)
 
     async def one_account(label, acc):
+        todo = []
         for it in items:
             key = f"{label}|{it.item_id}"
             if time.time() - recent.get(key, 0) < COOLDOWN:
                 continue                                          # ordered this card a moment ago
             recent[key] = time.time()
-            c0 = time.time()
-            try:
-                pay = await checkout(client, state, acc, it)
-            except GtsError as e:
-                problem(f"{label} · {it.title}: {e}")
-                if "login expired" in str(e):
-                    return                                        # no point trying the other cards
-                continue
-            except Exception as e:  # noqa: BLE001 - never fail silently: tell the owner what broke
-                log.exception("GamesTheShop auto-buy crashed for %s / %s", label, it.title)
-                problem(f"{label} · {it.title}: unexpected error {e!r}"[:300])
-                continue
+            todo.append(it)
+
+        async def done(it, pay, err, secs):
+            if err is not None:
+                problem(f"{label} · {it.title}: {err}")
+                return
             run["ok"] += 1
-            secs = time.time() - c0
             log.info("GamesTheShop: %s ordered %s in %.1fs (%s)", label, it.title, secs, pay.get("paytmOrderId"))
             task = asyncio.create_task(_pay_safe(bot, client, label, it.title, pay, owners, secs=secs))
             bot._bg.add(task)
             task.add_done_callback(bot._bg.discard)
+
+        if todo:
+            await order_cards(client, state, acc, todo, done)   # all this account's cards at once
 
     await asyncio.gather(*(one_account(l, a) for l, a in accts.items()))
     state.save()

@@ -1222,12 +1222,31 @@ class Controls:
         if on and not logged:
             lines += ["", "⚠️ Auto-buy is on, but no account is logged in yet."]
         rows = [[{"text": "⏸ Turn auto-buy OFF" if on else "🟢 Turn auto-buy ON", "callback_data": "gb:tog"}],
-                [{"text": "➕ Add account", "callback_data": "gb:add"},
-                 {"text": "🧪 Test with a link", "callback_data": "gb:test"}]]
+                [{"text": "➕ Add account", "callback_data": "gb:add"}]]
+        links = self._test_links()
+        if links:
+            rows.append([{"text": "🧪 Test: 1 order", "callback_data": "gb:t?:1"}]
+                        + ([{"text": f"🧪 Test: {len(links)} orders", "callback_data": f"gb:t?:{len(links)}"}]
+                           if len(links) > 1 else []))
+        rows.append([{"text": "🔗 Test another link", "callback_data": "gb:test"}])
         for label in list(accts)[:8]:
             rows.append([{"text": f"🗑 Remove {label}"[:40], "callback_data": f"gb:rm?:{label}"[:64]}])
         rows.append([{"text": "🔄 Refresh", "callback_data": "gb:home"}])
         return "\n".join(lines), {"inline_keyboard": rows}
+
+    def _test_links(self) -> list[str]:
+        """Saved test links (config.yaml gts_test_links), so tests need no typing."""
+        return [str(u).strip() for u in (self.bot.cfg.get("gts_test_links") or []) if "gamestheshop.com" in str(u)]
+
+    async def _run_saved_test(self, client, cid: str, links: list[str]) -> None:
+        from . import gtscheckout as gc
+        n_acc = sum(1 for a in gc.accounts(self.bot.state).values() if a.get("access"))
+        await self.tg.send(client, f"⏳ Placing test orders: {n_acc} account{'s' if n_acc != 1 else ''} × "
+                                   f"{len(links)} card{'s' if len(links) != 1 else ''}. "
+                                   "Each QR arrives as soon as it's ready…", chat_ids=[cid])
+        result = await self._gtsbuy_command(client, ["test", *links], cid)
+        await self.tg.send(client, result, chat_ids=[cid],
+                           reply_markup={"inline_keyboard": [[{"text": "⬅ Back to auto-buy", "callback_data": "gb:home"}]]})
 
     def _ask_markup(self, extra: list | None = None) -> dict:
         return {"inline_keyboard": ([extra] if extra else []) + [[{"text": "✖ Cancel", "callback_data": "gb:cancel"}]]}
@@ -1251,6 +1270,33 @@ class Controls:
             await self.tg.edit(client, cid, mid, "📱 <b>Add a GamesTheShop account</b>\n\n"
                                "Type the account's <b>mobile number</b> here (10 digits) and send it.\n"
                                "GamesTheShop will text it an OTP.", self._ask_markup())
+            return
+        elif act in ("t?", "t!"):
+            links = self._test_links()
+            n = int(arg) if arg.isdigit() else 1
+            links = links[:max(1, n)]
+            n_acc = sum(1 for a in accts.values() if a.get("access"))
+            if not links or not n_acc:
+                await self.tg.answer_callback(client, cq["id"], "Add an account first" if not n_acc else "No saved test links")
+                return
+            if act == "t?":                         # one tap = real orders, so confirm first
+                await self.tg.answer_callback(client, cq["id"])
+                total = n_acc * len(links)
+                await self.tg.edit(client, cid, mid,
+                                   f"🧪 <b>Test: {len(links)} order{'s' if len(links) != 1 else ''} per account</b>\n\n"
+                                   f"This places <b>{total} real order{'s' if total != 1 else ''}</b> "
+                                   f"({n_acc} account{'s' if n_acc != 1 else ''} × {len(links)}) and sends "
+                                   f"{'their QRs' if total != 1 else 'its QR'} here. Only scan a QR if you want to buy; "
+                                   "unpaid orders expire by themselves.",
+                                   {"inline_keyboard": [[{"text": "✅ Yes, place them", "callback_data": f"gb:t!:{len(links)}"},
+                                                         {"text": "✖ Cancel", "callback_data": "gb:home"}]]})
+                return
+            await self.tg.answer_callback(client, cq["id"], "Placing test orders…")
+            text, kb = self._buy_view("🧪 Test running – QRs arrive below.")
+            await self.tg.edit(client, cid, mid, text, kb)
+            task = asyncio.create_task(self._run_saved_test(client, cid, links))   # don't block other updates
+            self.bot._bg.add(task)
+            task.add_done_callback(self.bot._bg.discard)
             return
         elif act == "test":
             if not any(a.get("access") for a in accts.values()):

@@ -29,6 +29,12 @@ state_file: data/state.json
 # Only one running copy per bot token can use it — set false on a second copy (e.g. a home Blinkit copy).
 telegram_menu: true
 extension_push: true          # send restocks to the laptop browser extension (/extension to set up)
+# GamesTheShop auto-buy tests (/buy → 🧪 buttons): 1 order uses the first link, multiple uses all.
+# Pick cheap, in-stock items. Every test places REAL orders (unpaid ones expire by themselves).
+gts_test_links:
+  - https://www.gamestheshop.com/product/1af898cf-3a71-4541-aa3e-ce5e89a65bdf?variant=23d2c006-fc85-44b7-b0f2-5819ad47a4c9
+  - https://www.gamestheshop.com/product/1ea117d2-b402-482d-92b3-ab6499cfd56b?variant=cae70123-3f20-4b06-a61b-96ca394cf256
+  - https://www.gamestheshop.com/product/eb212e1e-94ec-4771-a594-ee1bb665ab6c?variant=b350bc7e-60bc-4a7b-8405-44064b1ccd30
 
 # Which product titles count as "PlayStation gift card"
 title_filter:

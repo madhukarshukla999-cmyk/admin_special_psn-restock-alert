@@ -745,6 +745,21 @@ class Bot:
                 await extension_push.refresh_purchases(client, self.state)
             await _sleep(600, self._stop)
 
+    async def _gts_login_loop(self, client) -> None:
+        """GamesTheShop auto-buy logins: check each one a minute after startup and every 30 min,
+        so an expired login is found (and the owner asked to log in again) before a restock."""
+        from . import gtscheckout
+        await _sleep(60, self._stop)
+        while not self._stop.is_set():
+            if gtscheckout.accounts(self.state) and not self.tg.dry_run:
+                try:
+                    res = await gtscheckout.check_logins(self, client)
+                    if res:
+                        log.info("GamesTheShop logins: %s", ", ".join(f"{k} {v}" for k, v in res.items()))
+                except Exception:  # noqa: BLE001
+                    log.exception("GamesTheShop login check failed")
+            await _sleep(gtscheckout.LOGIN_CHECK_EVERY, self._stop)
+
     # -- "bot was down" -----------------------------------------------------
     async def _heartbeat_loop(self, client) -> None:
         while not self._stop.is_set():
@@ -862,7 +877,8 @@ class Bot:
                      guarded(self._heartbeat_loop, "Heartbeat"),
                      guarded(self._daily_summary_loop, "Daily summary"),
                      guarded(self._quiet_digest_loop, "Quiet-hours digest"),
-                     guarded(self._purchases_loop, "Purchases")]
+                     guarded(self._purchases_loop, "Purchases"),
+                     guarded(self._gts_login_loop, "GamesTheShop logins")]
             if not self.tg.dry_run and self.cfg.get("telegram_menu", True):
                 tasks.append(self.controls.run(client, stop))   # Telegram commands
             if self.auto_update:

@@ -1223,6 +1223,7 @@ class Controls:
             lines.append("None yet. Tap ➕ Add account.")
         for label, a in accts.items():
             state = "⏳ waiting for OTP" if a.get("pending_otp") and not a.get("access") else \
+                    "🔑 login expired – tap ⚙️ to log in again" if a.get("expired") else \
                     "✅ ready" if a.get("access") else "❌ not logged in"
             lines.append(f"• {html.escape(label)} — {state} · {self._acc_pay_short(label)}")
         if on and not logged:
@@ -1259,6 +1260,8 @@ class Controls:
         rows.append([{"text": "🔗 Test another link", "callback_data": "gb:test"}])
         acc_btns = [{"text": f"⚙️ {label}"[:40], "callback_data": f"gb:acc:{label}"[:64]} for label in list(accts)[:8]]
         rows += [acc_btns[i:i + 2] for i in range(0, len(acc_btns), 2)]
+        if logged:
+            rows.append([{"text": "🔍 Check logins now", "callback_data": "gb:chk"}])
         rows.append([{"text": "🔄 Refresh", "callback_data": "gb:home"}])
         return "\n".join(lines), {"inline_keyboard": rows}
 
@@ -1277,7 +1280,10 @@ class Controls:
         a = gc.accounts(st).get(label) or {}
         own_vpa, own_mode = str(a.get("upi_id") or ""), a.get("pay_mode")
         mode, vpa = gc.pay_mode(st, label), gc.upi_id(st, label)
-        state = "✅ logged in" if a.get("access") else "⏳ waiting for OTP" if a.get("pending_otp") else "❌ not logged in"
+        state = ("🔑 expired – log in again" if a.get("expired") else "✅ logged in" if a.get("access")
+                 else "⏳ waiting for OTP" if a.get("pending_otp") else "❌ not logged in")
+        if a.get("checked") and not a.get("expired"):
+            state += f" (checked {_ago(a['checked'])})"
         lines = [f"⚙️ <b>Account {html.escape(label)}</b>", ""]
         if note:
             lines += [note, ""]
@@ -1295,6 +1301,7 @@ class Controls:
                 [{"text": "✏️ UPI ID for this account", "callback_data": f"gb:aupi:{label}"[:64]}]]
         if own_vpa:
             rows.append([{"text": "↩ Use the default UPI ID", "callback_data": f"gb:aupirm:{label}"[:64]}])
+        rows.append([{"text": "🔑 Log in again (OTP)", "callback_data": f"gb:relogin:{label}"[:64]}])
         rows += [[{"text": f"🗑 Remove {label}"[:40], "callback_data": f"gb:rm?:{label}"[:64]}],
                  [{"text": "⬅ All accounts", "callback_data": "gb:home"}]]
         return "\n".join(lines), {"inline_keyboard": rows}
@@ -1336,6 +1343,28 @@ class Controls:
                                "Type the account's <b>mobile number</b> here (10 digits) and send it.\n"
                                "GamesTheShop will text it an OTP.", self._ask_markup())
             return
+        elif act == "relogin" and arg in accts:
+            mobile = accts[arg].get("mobile") or (arg if arg.isdigit() else "")
+            if not mobile:
+                await self.tg.answer_callback(client, cq["id"], "No mobile saved – remove and add it again")
+                return
+            try:
+                await gc.request_otp(client, mobile)
+            except gc.GtsError as e:
+                await self.tg.answer_callback(client, cq["id"], str(e)[:190])
+                return
+            self._ask[cid] = {"kind": "otp", "label": arg, "ts": time.time(), "tries": 0}
+            await self.tg.answer_callback(client, cq["id"], "OTP sent 📲")
+            await self.tg.send(client, f"📲 OTP sent to <b>{html.escape(mobile)}</b> for <b>{html.escape(arg)}</b>.\n\n"
+                                       "Type the <b>OTP</b> from the SMS here and send it.", chat_ids=[cid],
+                               reply_markup=self._ask_markup([{"text": "🔁 Send OTP again", "callback_data": f"gb:resend:{arg}"[:64]}]))
+            return
+        elif act == "chk":
+            await self.tg.answer_callback(client, cq["id"], "Checking logins…")
+            res = await gc.check_logins(self.bot, client)
+            word = {"ok": "✅ OK", "expired": "🔑 expired", "unknown": "❔ couldn't check (try again later)"}
+            note = "<b>Login check</b>\n" + ("\n".join(f"• {html.escape(k)}: {word.get(v, v)}" for k, v in res.items())
+                                             or "No logged-in accounts.")
         elif act in ("acc", "apm", "aupi", "aupirm") and arg in accts:
             a = accts[arg]
             if act == "aupi":

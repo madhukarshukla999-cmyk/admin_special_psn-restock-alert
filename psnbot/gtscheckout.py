@@ -76,9 +76,9 @@ async def _request(method, path, *, json=None, params=None, headers=None, sessio
     h = {"Accept": "application/json, text/plain, */*", **SITE, **(headers or {})}
     try:
         if session is not None:                       # reuse the open connection
-            return await session.request(method, f"{API}{path}", json=json, params=params, headers=h, timeout=20)
+            return await session.request(method, f"{API}{path}", json=json, params=params, headers=h, timeout=12)
         async with _session() as s:                   # one-off call
-            return await s.request(method, f"{API}{path}", json=json, params=params, headers=h, timeout=20)
+            return await s.request(method, f"{API}{path}", json=json, params=params, headers=h, timeout=12)
     except GtsError:
         raise
     except Exception as e:  # noqa: BLE001 - network/curl errors surface as a clean message
@@ -291,24 +291,32 @@ async def paytm_upi_link(pay: dict) -> str:
         raise GtsError("checkout didn't return a Paytm token")
     body = {"head": {"channelId": "WAP", "txnToken": tok},
             "body": {"requestType": "NATIVE", "mid": mid, "orderId": oid, "paymentMode": "UPI_INTENT"}}
-    last = "no reply"
     kw = {"proxy": _proxy()} if _proxy() else {}
-    for host in PAYTM_HOSTS:
+
+    async def ask(host):
+        """(link, None) or (None, reason) from one Paytm host."""
         try:
             async with AsyncSession(impersonate="chrome", **kw) as s:
                 r = await s.post(f"{host}/theia/api/v1/processTransaction", params={"mid": mid, "orderId": oid},
-                                 json=body, headers={"Content-Type": "application/json"}, timeout=20)
+                                 json=body, headers={"Content-Type": "application/json"}, timeout=8)
             d = r.json()
         except Exception as e:  # noqa: BLE001
-            last = f"{host}: {e!r}"
-            continue
+            return None, f"{host}: {e!r}"
         b = d.get("body") or {}
         link = (b.get("deepLinkInfo") or {}).get("deepLink") or b.get("deepLink")
         if link and str(link).startswith("upi:"):
-            return str(link)
-        info = b.get("resultInfo") or {}
-        txn = b.get("txnInfo") or {}
-        last = (txn.get("RESPMSG") or info.get("resultMsg") or str(d)[:160])
+            return str(link), None
+        info, txn = b.get("resultInfo") or {}, b.get("txnInfo") or {}
+        return None, (txn.get("RESPMSG") or info.get("resultMsg") or str(d)[:160])
+
+    # one host at a time (the same token sent to both at once could look like a duplicate payment);
+    # secure.paytmpayments.com is GamesTheShop's own, the old securegw.paytm.in is only a fallback
+    last = "no reply"
+    for host in PAYTM_HOSTS:
+        link, why = await ask(host)
+        if link:
+            return link
+        last = why or last
     raise GtsError(f"Paytm didn't give a UPI link: {last}")
 
 
@@ -390,7 +398,7 @@ async def auto_checkout(bot, client, items) -> None:
     per account), while each QR is fetched in the background so the first one arrives quickly."""
     import html as _html
     state = bot.state
-    accts = {l: a for l, a in accounts(state).items() if a.get("access") and a.get("user_id")}
+    accts = {l: a for l, a in accounts(state).items() if a.get("access")}
     items = sorted([i for i in items if (i.extra or {}).get("product_id")],
                    key=lambda i: -(i.denomination or 0))
     if not accts or not items:

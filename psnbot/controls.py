@@ -1493,23 +1493,20 @@ class Controls:
                 return "No logged-in account. Add one with <code>/gtsbuy add &lt;mobile&gt;</code> first."
 
             async def run_account(label):
-                """Like a real restock: one order per card; each QR is sent the moment it's ready."""
+                """Like a real restock: every card at once; each QR is sent the moment it's ready."""
                 out = []
-                for it in items:
-                    t0 = time.time()
-                    try:
-                        res = await gc.checkout(client, self.bot.state, accts[label], it)
-                    except gc.GtsError as e:
-                        out.append(f"❌ {html.escape(label)} · {it.title}: {html.escape(str(e))}")
-                        if "login expired" in str(e):
-                            break
-                        continue
-                    secs = time.time() - t0
+
+                async def done(it, res, err, secs):
+                    if err is not None:
+                        out.append(f"❌ {html.escape(label)} · {it.title}: {html.escape(str(err))}")
+                        return
                     try:
                         await gc.pay_to_dm(self.bot, client, label, it.title, res, [str(cid)], secs=secs)
                         out.append(f"✅ {html.escape(label)} · {it.title}: ₹{res.get('amount')} – QR sent ({secs:.1f}s)")
                     except gc.GtsError as e:
                         out.append(f"⚠️ {html.escape(label)} · {it.title}: order placed, but no QR: {html.escape(str(e))}")
+
+                await gc.order_cards(client, self.bot.state, accts[label], items, done)
                 return out
 
             results = await asyncio.gather(*(run_account(l) for l in logged))   # all accounts at once

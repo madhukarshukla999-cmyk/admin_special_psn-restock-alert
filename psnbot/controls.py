@@ -651,6 +651,12 @@ class Controls:
             await self._on_user_button(client, cq, cid, data)
             return
         mid = msg.get("message_id")
+        if data.startswith("gp:"):
+            if not self.users.is_admin(cid):
+                await self.tg.answer_callback(client, cq["id"], "Not available")
+                return
+            await self._on_pay_button(client, cq, cid, data)
+            return
         if data.startswith("gb:"):
             if not self.users.is_admin(cid):
                 await self.tg.answer_callback(client, cq["id"], "Not available")
@@ -1232,8 +1238,19 @@ class Controls:
                              + (f" · ❌ {len(last.get('errors') or [])} problem(s)" if last.get("errors") else ""))
                 for e in (last.get("errors") or [])[:4]:
                     lines.append(f"   • {html.escape(e)[:160]}")
+        vpa, mode = gc.upi_id(st), gc.pay_mode(st)
+        lines += ["", "<b>Payment</b>",
+                  ("📲 A payment request goes to your UPI ID <b>" + html.escape(vpa) + "</b>; the QR comes too as a backup."
+                   if mode == "upi" else "📷 You get a QR to scan" + (f" (UPI ID {html.escape(vpa)} saved for the 📲 button)." if vpa else "."))]
+        open_n = len(gc.PENDING)
+        if open_n:
+            lines.append(f"🧾 {open_n} payment{'s' if open_n != 1 else ''} waiting.")
         rows = [[{"text": "⏸ Turn auto-buy OFF" if on else "🟢 Turn auto-buy ON", "callback_data": "gb:tog"}],
+                [{"text": "💳 Pay by: " + ("📲 UPI request" if mode == "upi" else "📷 QR"), "callback_data": "gb:pm"},
+                 {"text": "✏️ UPI ID" + (f": {vpa}" if vpa else ""), "callback_data": "gb:upi"}],
                 [{"text": "➕ Add account", "callback_data": "gb:add"}]]
+        if open_n:
+            rows.append([{"text": f"❌ Cancel all waiting payments ({open_n})", "callback_data": "gb:xall"}])
         links = self._test_links()
         if links:
             rows.append([{"text": "🧪 Test: 1 order", "callback_data": "gb:t?:1"}]
@@ -1282,6 +1299,41 @@ class Controls:
                                "Type the account's <b>mobile number</b> here (10 digits) and send it.\n"
                                "GamesTheShop will text it an OTP.", self._ask_markup())
             return
+        elif act == "pm":
+            if not gc.upi_id(st):
+                self._ask[cid] = {"kind": "upi", "ts": time.time(), "then_mode": True}
+                await self.tg.answer_callback(client, cq["id"])
+                await self.tg.edit(client, cid, mid, "💳 <b>Pay by UPI request</b>\n\nType your <b>UPI ID</b> "
+                                   "(e.g. <code>name@okicici</code>) and send it. Each order then sends a payment "
+                                   "request to your UPI app; you approve it with your PIN.", self._ask_markup())
+                return
+            st.settings["gts_pay_mode"] = "qr" if gc.pay_mode(st) == "upi" else "upi"
+            st.save()
+            note = ("📲 Orders now send a payment request to " + html.escape(gc.upi_id(st)) + " (QR as a backup)."
+                    if gc.pay_mode(st) == "upi" else "📷 Orders now send a QR.")
+            await self.tg.answer_callback(client, cq["id"], "Saved")
+        elif act == "upi":
+            self._ask[cid] = {"kind": "upi", "ts": time.time()}
+            await self.tg.answer_callback(client, cq["id"])
+            cur = gc.upi_id(st)
+            extra = [{"text": "🗑 Remove UPI ID", "callback_data": "gb:upirm"}] if cur else None
+            await self.tg.edit(client, cid, mid, "✏️ <b>UPI ID</b>" + (f"\nNow: <code>{html.escape(cur)}</code>" if cur else "") +
+                               "\n\nType your UPI ID (e.g. <code>name@okicici</code>) and send it.", self._ask_markup(extra))
+            return
+        elif act == "upirm":
+            self._ask.pop(cid, None)
+            st.settings.pop("gts_upi_id", None)
+            st.settings["gts_pay_mode"] = "qr"
+            st.save()
+            note = "🗑 UPI ID removed. Orders send a QR."
+            await self.tg.answer_callback(client, cq["id"], "Removed")
+        elif act == "xall":
+            n = 0
+            for key in list(gc.PENDING):
+                if await gc.cancel_payment(self.bot, client, key):
+                    n += 1
+            note = f"❌ Cancelled {n} waiting payment{'s' if n != 1 else ''}. The unpaid orders expire by themselves."
+            await self.tg.answer_callback(client, cq["id"], "Cancelled")
         elif act in ("t?", "t!"):
             links = self._test_links()
             n = int(arg) if arg.isdigit() else 1
@@ -1346,6 +1398,30 @@ class Controls:
         text, kb = self._buy_view(note)
         await self.tg.edit(client, cid, mid, text, kb)
 
+    async def _on_pay_button(self, client, cq, cid: str, data: str) -> None:
+        """❌ Cancel / 📲 Send to my UPI ID, under a payment QR."""
+        from . import gtscheckout as gc
+        _, act, key = (data.split(":", 2) + ["", ""])[:3]
+        if act == "x":
+            p = await gc.cancel_payment(self.bot, client, key)
+            if not p:
+                await self.tg.answer_callback(client, cq["id"], "Already gone (paid, cancelled or expired)")
+                return
+            await self.tg.answer_callback(client, cq["id"], "Cancelled")
+            await self.tg.send(client, f"❌ Cancelled: {html.escape(p['label'])} · {html.escape(p['title'])}. "
+                                       "Nothing was paid; the unpaid order expires by itself.", chat_ids=[cid])
+        elif act == "upi":
+            try:
+                vpa = await gc.request_payment(self.bot, key)
+            except gc.GtsError as e:
+                await self.tg.answer_callback(client, cq["id"], str(e)[:190])
+                return
+            await self.tg.answer_callback(client, cq["id"], f"Request sent to {vpa}")
+            await self.tg.send(client, f"📲 Payment request sent to <b>{html.escape(vpa)}</b> – approve it in your "
+                                       "UPI app.", chat_ids=[cid])
+        else:
+            await self.tg.answer_callback(client, cq["id"])
+
     async def _buy_on_text(self, client, cid: str, text: str) -> None:
         """The owner typed an answer for /buy: a mobile number, an OTP, or links to test."""
         from . import gtscheckout as gc
@@ -1394,6 +1470,23 @@ class Controls:
                 return
             self._ask.pop(cid, None)
             t, kb = self._buy_view(f"✅ <b>{html.escape(label)}</b> is logged in.")
+            await send(t, reply_markup=kb)
+            return
+
+        if ask["kind"] == "upi":
+            vpa = text.strip().replace(" ", "")
+            if not _re.fullmatch(r"[A-Za-z0-9._\-]{2,256}@[A-Za-z][A-Za-z0-9.\-]{1,63}", vpa):
+                await send("That doesn't look like a UPI ID. It looks like <code>name@okicici</code> or "
+                           "<code>9876543210@ybl</code>.", reply_markup=self._ask_markup())
+                return
+            st.settings["gts_upi_id"] = vpa
+            if ask.get("then_mode"):
+                st.settings["gts_pay_mode"] = "upi"
+            st.save()
+            self._ask.pop(cid, None)
+            t, kb = self._buy_view(f"✅ UPI ID saved: <b>{html.escape(vpa)}</b>"
+                                   + (". Orders now send a payment request to it." if gc.pay_mode(st) == "upi" else
+                                      ". Tap 💳 Pay by to switch to UPI requests, or use 📲 under any QR."))
             await send(t, reply_markup=kb)
             return
 

@@ -407,7 +407,8 @@ def _pay_buttons(key: str, vpa: str) -> dict:
     row = [{"text": "❌ Cancel", "callback_data": f"gp:x:{key}"}]
     if vpa:
         row.insert(0, {"text": "📲 Send to my UPI ID", "callback_data": f"gp:upi:{key}"})
-    return {"inline_keyboard": [row]}
+    return {"inline_keyboard": [row, [{"text": "🔄 Check if the shop got the payment",
+                                       "callback_data": f"gp:chk:{key}"}]]}
 
 
 async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: list[str], secs: float | None = None) -> str:
@@ -464,11 +465,18 @@ async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: li
     PENDING[key]["chat"] = sent
 
     async def expire():                              # delete it once it can't be paid any more
-        if PENDING.pop(key, None) is None:
-            return                                   # already cancelled
+        p = PENDING.pop(key, None)
+        if p is None:
+            return                                   # already cancelled or already reported
+        PAID_SEEN[key] = dict(p)                     # the 🔄 button keeps working afterwards
         for cid, mid, _ in sent:
             await bot.tg.api(client, "deleteMessage", {"chat_id": cid, "message_id": mid})
     bot._later(minutes * 60, expire())
+    # read the order back from GamesTheShop until it's paid / failed (the bot pays through Paytm,
+    # so the website never runs its own "payment done" step)
+    watch = asyncio.create_task(watch_order(bot, client, key, list(chat_ids)))
+    bot._bg.add(watch)
+    watch.add_done_callback(bot._bg.discard)
     if requested.startswith("📲"):
         return f"UPI request sent to {vpa}" + (" + QR" if png else "")
     return "QR sent to your DM" if png else "UPI link sent to your DM"
@@ -716,3 +724,169 @@ async def check_logins(bot, client) -> dict:
             await mark_expired(bot, client, label)
     bot.state.save()
     return out
+
+
+# -- did GamesTheShop actually record the payment? ---------------------------------------------
+# The bot pays through Paytm directly, so the website never runs its own "payment done" step.
+# After each payment we therefore read the order back from GamesTheShop and say what it shows.
+# The order-detail address wasn't in the recording, so these read-only (GET) candidates are tried
+# once and the one that answers is remembered. Nothing here changes an order.
+ORDER_PATHS = ("/orders/{oid}/", "/orders/{oid}", "/orders/detail/{oid}/", "/customer/orders/{oid}/",
+               "/customer/orders/{oid}", "/orders/", "/customer/orders/")
+_ORDER_PATH: str | None = None
+_ORDER_PATH_NONE = False          # every candidate failed: ask the owner for a recording, once
+
+ORDER_POLL_EVERY = 20             # seconds between order-status reads
+ORDER_WATCH_GRACE = 180           # keep watching this long after the QR expires
+
+PAID_WORDS = ("paid", "success", "completed", "complete", "confirmed", "placed", "processing",
+              "delivered", "dispatched", "shipped")
+FAILED_WORDS = ("failed", "cancelled", "canceled", "expired", "declined", "refund")
+PENDING_WORDS = ("pending", "awaiting", "initiated", "unpaid", "created", "incomplete")
+
+
+def _status_of(obj, oid: str) -> tuple[str, str]:
+    """(state, text) from an order payload. state: paid / failed / pending / unknown."""
+    found: list[str] = []
+
+    def walk(o, depth=0):
+        if depth > 6:
+            return
+        if isinstance(o, dict):
+            # a list of orders: only the one we asked about counts
+            ids = {str(o.get(k)) for k in ("order_id", "id", "checkout_group_id", "paytmOrderId") if o.get(k)}
+            if ids and oid and not any(oid in i or i in oid for i in ids) and any(
+                    k in o for k in ("order_status", "payment_status", "status")):
+                return
+            for k, v in o.items():
+                if isinstance(v, str) and v and ("status" in k.lower() or k.lower() in ("state", "payment")):
+                    found.append(f"{k}={v}")
+                else:
+                    walk(v, depth + 1)
+        elif isinstance(o, list):
+            for v in o[:20]:
+                walk(v, depth + 1)
+
+    walk(obj)
+    blob = " ".join(found).lower()
+    text = ", ".join(found[:4])[:160]
+    if not blob:
+        return "unknown", text
+    if any(w in blob for w in FAILED_WORDS):
+        return "failed", text
+    if any(w in blob for w in PENDING_WORDS):
+        return "pending", text
+    if any(w in blob for w in PAID_WORDS):
+        return "paid", text
+    return "unknown", text
+
+
+async def order_status(acc: dict, order_id: str) -> tuple[str, str]:
+    """Read one order back from GamesTheShop. (state, text); state 'unknown' = couldn't tell."""
+    global _ORDER_PATH, _ORDER_PATH_NONE
+    if _ORDER_PATH_NONE or not acc.get("access"):
+        return "unknown", ""
+    paths = [_ORDER_PATH] if _ORDER_PATH else list(ORDER_PATHS)
+    for path in paths:
+        try:
+            r = await _get(None, path.format(oid=order_id), headers=_auth(acc))
+        except GtsError:
+            continue
+        if r.status_code != 200:
+            continue
+        try:
+            d = r.json()
+        except ValueError:
+            continue
+        state, text = _status_of(d.get("data", d), order_id)
+        if state != "unknown" or _ORDER_PATH:
+            _ORDER_PATH = path
+            return state, text
+    if not _ORDER_PATH:
+        _ORDER_PATH_NONE = True
+        log.warning("GamesTheShop: no order-status endpoint found; can't confirm payments")
+    return "unknown", ""
+
+
+def _order_lines(p: dict) -> str:
+    import html as _html
+    return (f"👤 {_html.escape(str(p.get('label', '')))} · {_html.escape(str(p.get('title', '')))}\n"
+            f"💰 ₹{_html.escape(str(p.get('amount', '?')))}\n"
+            f"🧾 Paytm order: <code>{_html.escape(str(p.get('paytmOrderId', ''))[:60])}</code>\n"
+            f"🆔 Shop order: <code>{_html.escape(str(p.get('order_id', ''))[:60])}</code>")
+
+
+async def report_order(bot, client, p: dict, chat_ids: list[str], state: str, text: str) -> None:
+    """Tell the owner what GamesTheShop shows for this order."""
+    import html as _html
+    detail = f"\n<i>{_html.escape(text)}</i>" if text else ""
+    if state == "paid":
+        msg = "✅ <b>Payment recorded by GamesTheShop</b>\n" + _order_lines(p) + detail
+    elif state == "failed":
+        msg = ("❌ <b>GamesTheShop says this order failed or was cancelled</b>\n" + _order_lines(p) + detail +
+               "\nIf money left your account, it's normally refunded automatically. Keep the UPI reference.")
+    elif state == "pending":
+        msg = ("⚠️ <b>You paid, but GamesTheShop still shows this order as unpaid</b>\n" + _order_lines(p) + detail +
+               "\nSend these details and your UPI reference (UTR) to GamesTheShop support so they can match "
+               "the payment. Unmatched UPI payments are usually refunded automatically.")
+    else:
+        msg = ("❔ <b>Couldn't read this order's status from GamesTheShop</b>\n" + _order_lines(p) +
+               "\nCheck <b>My orders</b> on the site. If it isn't there, send these details to their support.")
+    await bot.tg.send(client, msg, chat_ids=chat_ids)
+
+
+async def check_order_now(bot, client, key: str, chat_ids: list[str]) -> str:
+    """🔄 button: read the order back right now and report it."""
+    p = PENDING.get(key) or PAID_SEEN.get(key)
+    if not p:
+        raise GtsError("this payment is no longer being tracked")
+    acc = accounts(bot.state).get(p.get("label")) or {}
+    state, text = await order_status(acc, p.get("order_id") or p.get("paytmOrderId") or "")
+    await report_order(bot, client, p, chat_ids, state, text)
+    return state
+
+
+PAID_SEEN: dict[str, dict] = {}   # orders already reported, so the 🔄 button still works after
+
+
+async def watch_order(bot, client, key: str, chat_ids: list[str]) -> None:
+    """After a payment is sent out: read the order back until it's paid, failed, or time runs out.
+    A payment that GamesTheShop never records is the problem this is here to catch."""
+    p = PENDING.get(key)
+    if not p:
+        return
+    acc = accounts(bot.state).get(p.get("label")) or {}
+    oid = p.get("order_id") or p.get("paytmOrderId") or ""
+    deadline = time.time() + QR_MINUTES * 60 + ORDER_WATCH_GRACE   # a little past the QR's life
+    last = "unknown"
+    while time.time() < deadline:
+        await asyncio.sleep(ORDER_POLL_EVERY)
+        if key not in PENDING:                            # cancelled by the owner
+            return
+        try:
+            state, text = await order_status(acc, oid)
+        except Exception:  # noqa: BLE001
+            log.exception("GamesTheShop order status failed")
+            return
+        if state == "unknown" and _ORDER_PATH_NONE:
+            return                                        # no endpoint: nothing to poll
+        last = state if state != "unknown" else last
+        if state in ("paid", "failed"):
+            PAID_SEEN[key] = dict(p)
+            PENDING.pop(key, None)
+            await report_order(bot, client, p, chat_ids, state, text)
+            return
+    # Time's up and it still isn't recorded. The bot can't know whether you paid, so this is a
+    # quiet note (no notification sound) that reads right either way.
+    import html as _html
+    PAID_SEEN[key] = dict(p)
+    if last == "unknown":
+        return                                            # couldn't read the order at all: stay silent
+    for cid in chat_ids:
+        await bot.tg.api(client, "sendMessage", {
+            "chat_id": cid, "parse_mode": "HTML", "disable_notification": True,
+            "text": "⌛ <b>No payment recorded for this order</b>\n" + _order_lines(p) +
+                    "\nFine if you didn't pay it. <b>If you did pay</b>, send these details and your UPI "
+                    "reference (UTR) to GamesTheShop support – the payment didn't reach the order.",
+            "reply_markup": {"inline_keyboard": [[{"text": "🔄 Check this order again",
+                                                   "callback_data": f"gp:chk:{key}"}]]}})

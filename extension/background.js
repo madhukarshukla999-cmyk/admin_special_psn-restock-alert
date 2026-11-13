@@ -754,9 +754,17 @@ amzWatchKick();
 // check. The search list can say "In Stock" for minutes after a card sells out, so a card only
 // counts as back once its product page's own request (live stock) agrees, like the bot does.
 const GTS_API = "https://green-api.gamestheshop.com/storefront";
-const GTS_WATCH_DEFAULTS = { gtsWatch: false, gtsWatchSec: 1 };
+const GTS_WATCH_DEFAULTS = { gtsWatch: false, gtsWatchSec: 3 };
 const GTS_VERIFY_PER_MIN = 30;                    // live-stock requests per minute, on top of the list
+const GTS_MAX_SEC = 30;                           // slowest the automatic back-off will go
+const GTS_CLEAN_MS = 5 * 60 * 1000;               // this long without a 429 before easing back up
 let gtsTimer = null, gtsBusy = false, gtsPauseUntil = 0, gtsFails = 0;
+// GamesTheShop rate-limits (HTTP 429). Retrying at the same speed just gets blocked again, so the
+// interval is raised on every 429 and eased back down after a long clean run. Kept in session
+// storage so restarting the worker doesn't go straight back to hammering the shop.
+// gtsFloor = the fastest interval the shop has refused. The interval never eases back below a
+// little above that, so it settles on a speed the shop accepts instead of bouncing in and out of 429.
+let gtsEvery = 0, gtsRetryAfter = 0, gtsFloor = 0, gtsCleanSince = 0;
 const gtsLiveCache = {};                          // variant id -> { ts, live }
 
 // The API only answers requests that come from the shop's own site
@@ -781,7 +789,7 @@ async function gtsList() {
       headers: { "Content-Type": "application/json", Accept: "application/json, text/plain, */*" },
       body: JSON.stringify({ searchQuery: "gift card" }) });
   } catch { return null; }
-  if (r.status === 429) return "limited";
+  if (r.status === 429) { gtsRetryAfter = Number(r.headers.get("retry-after")) || 0; return "limited"; }
   if (!r.ok) return null;
   const rows = (await r.json().catch(() => ({}))).data;
   if (!Array.isArray(rows)) return null;
@@ -812,6 +820,25 @@ async function gtsStatus(text) {
   if (gtsWatchInfo !== text) await chrome.storage.local.set({ gtsWatchInfo: text });
 }
 
+// HTTP 429: wait (Retry-After if the shop sent one), then check less often from now on.
+async function gtsSlowDown(want, every) {
+  const wait = Math.min(300, Math.max(30, gtsRetryAfter || 60));
+  gtsRetryAfter = 0;
+  gtsPauseUntil = Date.now() + wait * 1000;
+  gtsCleanSince = 0;
+  gtsFloor = Math.max(gtsFloor, every);           // this speed is known to be refused
+  const next = Math.min(GTS_MAX_SEC * 1000, Math.max(want, every * 2));
+  const changed = next !== gtsEvery;
+  gtsEvery = next;
+  await chrome.storage.session.set({ gtsEvery, gtsFloor });
+  if (changed) {                                  // only when the interval really changes: no log spam
+    await log(`GamesTheShop check: too many requests – waiting ${wait}s, then checking every `
+              + `${Math.round(next / 1000)} s instead of ${want / 1000} s.`
+              + (next >= GTS_MAX_SEC * 1000 ? " This is as slow as it goes; the bot checks this store too, "
+                 + "so you can switch this off in Options." : ""));
+  }
+}
+
 function gtsWatchKick() {
   if (!gtsTimer && !gtsBusy) gtsTimer = setTimeout(gtsWatchRun, 300);
 }
@@ -820,7 +847,14 @@ async function gtsWatchRun() {
   gtsTimer = null;
   const s = await chrome.storage.local.get({ ...GTS_WATCH_DEFAULTS, enabled: true, remotePaused: false, stores: DEFAULTS.stores });
   if (!s.gtsWatch || !s.enabled) { await gtsStatus(""); return; }      // the 30 s alarm / a settings change starts it again
-  const every = Math.max(1, Number(s.gtsWatchSec) || 1) * 1000;
+  const want = Math.max(1, Number(s.gtsWatchSec) || 3) * 1000;
+  if (!gtsEvery) {
+    const saved = await chrome.storage.session.get({ gtsEvery: 0, gtsFloor: 0 });
+    gtsEvery = saved.gtsEvery || want;
+    gtsFloor = saved.gtsFloor || 0;
+  }
+  const every = Math.max(want, gtsEvery);         // your setting, or slower while the shop is pushing back
+  const slowed = every > want;
   gtsBusy = true;
   try {
     if (s.remotePaused || (s.stores && s.stores.gamestheshop === false)) {
@@ -830,8 +864,7 @@ async function gtsWatchRun() {
     } else {
       let rows = await gtsList();
       if (rows === "limited") {
-        gtsPauseUntil = Date.now() + 60 * 1000;
-        await log("GamesTheShop check: too many requests (HTTP 429) – pausing 1 min. If it keeps happening, use a longer interval in Options.");
+        await gtsSlowDown(want, every);
       } else if (!rows) {
         if (++gtsFails >= 5) await gtsStatus("⚠ Couldn't read GamesTheShop's stock list");
       } else {
@@ -848,7 +881,7 @@ async function gtsWatchRun() {
         const due = listed.filter((r) => !gtsLiveCache[r.vid] || now - gtsLiveCache[r.vid].ts >= gap);
         const res = await Promise.all(due.map((r) => gtsLive(r.pid, r.vid)));
         due.forEach((r, i) => {
-          if (res[i] === "limited") gtsPauseUntil = Date.now() + 60 * 1000;
+          if (res[i] === "limited") gtsSlowDown(want, every).catch(() => {});
           else if (res[i] !== null) gtsLiveCache[r.vid] = { ts: now, live: res[i] };
         });
         const back = [];
@@ -862,7 +895,18 @@ async function gtsWatchRun() {
         }
         if (changed) await chrome.storage.session.set({ gtsLast });
         const inStock = rows.filter((r) => gtsLast[r.vid] === true).length;
-        await gtsStatus(`● Checking ${rows.length} PlayStation cards every ${every / 1000} s · ${inStock} in stock`);
+        // a long clean run: ease back up, but never below a little above a speed that was refused
+        const target = Math.max(want, Math.round(gtsFloor * 1.25));
+        if (!gtsCleanSince) gtsCleanSince = Date.now();
+        if (every > target && Date.now() - gtsCleanSince >= GTS_CLEAN_MS) {
+          gtsCleanSince = Date.now();
+          gtsEvery = Math.max(target, Math.round(every * 0.8));
+          await chrome.storage.session.set({ gtsEvery });
+          await log(`GamesTheShop check: going faster again – every ${(gtsEvery / 1000).toFixed(1)} s.`);
+        }
+        await gtsStatus(`● Checking ${rows.length} PlayStation cards every ${(every / 1000).toFixed(every < 10000 ? 1 : 0)} s`
+                        + (slowed ? ` (the shop asked me to slow down; you set ${want / 1000} s)` : "")
+                        + ` · ${inStock} in stock`);
         if (back.length) {
           const val = (r) => amzValue(r.name) || 0;
           back.sort((a, b) => val(a) - val(b));

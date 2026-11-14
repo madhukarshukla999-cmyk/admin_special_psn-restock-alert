@@ -314,6 +314,33 @@ function amzSkipOffer() {
 
 const amzOnOffers = () => /\/(checkout|gp\/buy)\/.*\/offers\b/.test(location.pathname);
 
+// Press "Use this payment method" until the page moves on. Amazon shows the button twice (top of
+// the page and under the list); one copy can be covered or not wired up yet, so try each one,
+// the one really on top first (then form submit). Returns "moved" (new URL), "next" (review page
+// / offers page drawn in place) or the list of what was tried.
+async function amzPressUse(first) {
+  const advanced = () => moved() ? "moved" : (amzOnOffers() || (amzPayWithUpi() && amzQrChosen())) ? "next" : null;
+  const tried = [];
+  const seen = new Set();
+  for (let i = 0; i < 6; i++) {
+    const el = (i === 0 && first) ? first
+      : amzButtons(/^use this payment method$/i).find((e) => !seen.has(e)) || [...seen][i % Math.max(1, seen.size)];
+    if (!el) break;
+    seen.add(el);
+    tried.push(`${el.tagName.toLowerCase()}${el.id ? "#" + el.id : ""}${onTop(el) ? ":top" : ":covered"}`);
+    if (i) await step("chosen", `Amazon: 'Use this payment method' again (${i + 1})…`);
+    realClick(el);
+    const r = await find(advanced, 3500);
+    if (r) return r;
+    if (el.form && el.matches("input[type=submit], button")) {
+      try { el.form.requestSubmit(el); } catch { /* ignore */ }
+      const r2 = await find(advanced, 3500);
+      if (r2) return r2;
+    }
+  }
+  return tried;
+}
+
 const DECLINE_RE = /^(no,? thanks?|no thank you|not now|skip( this)?|maybe later|continue without (prime|offers?|subscribing))$/i;
 const btnText = (e) => ((e.innerText || e.value || e.getAttribute("aria-label") || "") + "").trim().slice(0, 30) || e.tagName;
 const inDialog = (e) => !!e.closest('[role=dialog], .a-popover-wrapper, .a-modal-scroller, .a-popover');
@@ -430,7 +457,11 @@ async function amazonCheckout(job) {
     // here (top-right "Use this payment method") unless the frame already pressed its own.
     await step("chosen", "Amazon: UPI QR chosen – clicking 'Use this payment method'…");
     await sleep(400);
-    if (!frameState.pressed && !moved()) { const use = amzUseThisPayment(); if (use) realClick(use); }
+    if (!frameState.pressed && !moved()) {
+      const res = await amzPressUse(amzUseThisPayment());
+      if (res === "moved") return;
+      if (res === "next") return amazonCheckout({ ...job, step: "chosen" });
+    }
     if (await find(() => amzPayWithUpi() && amzQrChosen() || amzOnOffers(), 15000))
       return amazonCheckout({ ...job, step: "chosen" });
     if (await amzOfferAfter(job)) return;
@@ -447,12 +478,11 @@ async function amazonCheckout(job) {
       return step("checkout", "Amazon: couldn't select 'Scan and Pay with UPI' – tap it, then 'Use this payment method'. " + amzDiag(), true);
     }
     await step("chosen", "Amazon: UPI QR chosen – clicking 'Use this payment method'…");
-    realClick(use);
-    // review page: usually a new URL (handled by the main loop); if it updates in place, go on here
-    if (await find(() => amzPayWithUpi() && amzQrChosen() || amzOnOffers(), 15000))
-      return amazonCheckout({ ...job, step: "chosen" });
+    const res = await amzPressUse(use);
+    if (res === "moved") return;                      // new URL: the main loop carries on
+    if (res === "next") return amazonCheckout({ ...job, step: "chosen" });   // updated in place
     if (await amzOfferAfter(job)) return;
-    return step("checkout", AMZ_STUCK + amzDiag(), true);   // (says nothing if the page moved on)
+    return step("checkout", AMZ_STUCK + `[tried ${JSON.stringify(res)}] ` + amzDiag(), true);
   }
   if (what === "change") {
     await step("changepay", "Amazon: review page has another payment method – clicking 'Change'…");

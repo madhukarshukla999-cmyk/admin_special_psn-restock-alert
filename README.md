@@ -39,6 +39,33 @@ sudo journalctl -u psn-bot -f                   # watch the logs
 ```
 The service starts on boot and restarts if it crashes.
 
+### Oracle Cloud (Always Free)
+The bot only makes outgoing connections, so there are no ports to open and no web server to set up.
+
+1. **Create the VM:** in the Oracle Cloud console go to **Compute → Instances → Create instance**.
+   - **Image:** *Canonical Ubuntu 24.04* (it ships Python 3.12, the version this bot uses).
+   - **Shape:** *VM.Standard.A1.Flex* (Ampere, ARM) with 1 OCPU and 6 GB RAM, or *VM.Standard.E2.1.Micro* (AMD, 1 GB RAM). Both are marked *Always Free-eligible*. If A1 says *Out of capacity*, try another availability domain, try again later, or use E2.1.Micro.
+   - **Networking:** keep the default VCN and *Assign a public IPv4 address*.
+   - **SSH keys:** *Generate a key pair for me* and download the private key (or paste your own public key).
+2. **Log in and install:**
+   ```bash
+   chmod 600 ~/Downloads/ssh-key-*.key
+   ssh -i ~/Downloads/ssh-key-*.key ubuntu@<public-ip>
+   sudo apt-get update && sudo apt-get install -y git
+   git clone https://github.com/madhukarshukla999-cmyk/psn-stock-bot.git && cd psn-stock-bot
+   cp .env.example .env && nano .env              # paste token + chat id
+   sudo bash deploy/install.sh                     # installs + starts the psn-bot service
+   sudo journalctl -u psn-bot -f                   # watch the logs
+   ```
+   The live copy and its `.env` are in `/opt/psn-stock-bot`. To change settings later: `sudo nano /opt/psn-stock-bot/.env` (or `config.yaml`), then `sudo systemctl restart psn-bot`.
+3. **Blinkit and GyFTR:** both block cloud IPs, and Oracle's IPs count as cloud. Check from the VM:
+   ```bash
+   cd /opt/psn-stock-bot && sudo -u psnbot .venv/bin/python -m psnbot --test-blinkit
+   ```
+   If it's blocked, add `BLINKIT_WARP=1` to `/opt/psn-stock-bot/.env` and restart. The WARP tunnel works on both the ARM (A1) and AMD shapes.
+4. **Stop other copies:** only one copy may run per Telegram bot, so turn off the Heroku worker dyno or the PC task. You can copy your data across first with `--export-state` / `--import-state`, or copy `data/state.json` into `/opt/psn-stock-bot/data/` (then `sudo chown psnbot:psnbot` it).
+5. **Idle instances:** Oracle can stop Always Free VMs that look idle over 7 days (CPU, network and, on A1, memory all below about 20%). This bot uses very little, so it can trigger this. Upgrading the account to **Pay As You Go** removes the rule, and Always Free resources stay free. Set a small budget alert under **Billing → Budgets** so you notice if anything starts to cost money.
+
 ### Windows PC (start automatically at login)
 From the `psn-stock-bot` folder, after creating `.venv`, installing requirements and filling in `.env`:
 ```

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup on a Debian/Ubuntu VM (e.g. Google Cloud Compute Engine).
+# One-time setup on a Debian/Ubuntu VM (Google Cloud Compute Engine, Oracle Cloud Always Free, ...).
 # Run from inside the project folder:  sudo bash deploy/install.sh
 set -euo pipefail
 

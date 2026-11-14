@@ -96,7 +96,43 @@ class Shop(Store):
         return list(seen.values())
 
     # -- Shopify -------------------------------------------------------------
+    def _variants(self, handle: str, title: str, variants: list, cents: bool) -> list[Item]:
+        out = []
+        for v in variants:
+            vt = v.get("title") or ""
+            full = title if vt.lower() in ("", "default title") or vt in title else f"{title} – {vt}"
+            # /products/<h>.js gives paise (100000); products.json gives rupees as text ("1000.00")
+            price = float(v.get("price") or 0) / (100 if cents else 1)
+            mrp = float(v.get("compare_at_price") or 0) / (100 if cents else 1)
+            out.append(Item(
+                store=self.id, item_id=str(v["id"]), title=full,
+                url=f"{self.base}/products/{handle}" + (f"?variant={v['id']}" if len(variants) > 1 else ""),
+                in_stock=bool(v.get("available")) and price > 0,
+                price=price or None, mrp=mrp or None))
+        return out
+
+    async def _shopify_collections(self, client, collections: list[str]) -> list[Item]:
+        """Every card in the shop's PlayStation collection(s), one request each (with stock per
+        value). Much lighter than one request per card, which some shops rate-limit (HTTP 429)."""
+        items: list[Item] = []
+        gap = self.between()
+        for c in collections:
+            await gap()
+            r = await self.get(client, f"{self.base}/collections/{c}/products.json",
+                               params={"limit": 250}, headers=_JSON)
+            try:
+                products = r.json()["products"]
+            except Exception as e:
+                raise StoreError(f"{self.name}: unexpected collection response for {c}: {e!r}")
+            for p in products:
+                title = p.get("title") or ""
+                if self._is_card(title):
+                    items += self._variants(p.get("handle") or "", title, p.get("variants") or [], cents=False)
+        return items
+
     async def _shopify(self, client) -> list[Item]:
+        if self.cfg.get("collections"):
+            return await self._shopify_collections(client, list(self.cfg["collections"]))
         for q in self.queries:
             r = await self.get(client, self.base + "/search/suggest.json", headers=_JSON, params={
                 "q": q, "resources[type]": "product", "resources[limit]": 10,
@@ -112,26 +148,19 @@ class Shop(Store):
             self.known.setdefault(h, h)
 
         items: list[Item] = []
-        gap = self.between(0.3, 0.8)
+        gap = self.between(1.0, 2.0)
         for handle in list(self.known):
             await gap()
             r = await client.get(f"{self.base}/products/{handle}.js", headers=_JSON)
+            if r.status_code == 429:                         # slow down once, then count it as a failed check
+                await self.polite_pause(3.0, 5.0)
+                r = await client.get(f"{self.base}/products/{handle}.js", headers=_JSON)
             if r.status_code == 404:                         # listing deleted
                 self.known.pop(handle, None)
                 continue
             if r.status_code != 200:
+                # a failed check never counts as sold out, so no false alerts
                 raise StoreError(f"{self.name}: HTTP {r.status_code} for {handle}")
             p = r.json()
-            title = p.get("title") or handle
-            variants = p.get("variants") or []
-            for v in variants:
-                vt = v.get("title") or ""
-                full = title if vt.lower() in ("", "default title") or vt in title else f"{title} – {vt}"
-                price = (v.get("price") or 0) / 100
-                mrp = (v.get("compare_at_price") or 0) / 100
-                items.append(Item(
-                    store=self.id, item_id=str(v["id"]), title=full,
-                    url=f"{self.base}/products/{handle}" + (f"?variant={v['id']}" if len(variants) > 1 else ""),
-                    in_stock=bool(v.get("available")) and price > 0,
-                    price=price or None, mrp=mrp or None))
+            items += self._variants(handle, p.get("title") or handle, p.get("variants") or [], cents=True)
         return items

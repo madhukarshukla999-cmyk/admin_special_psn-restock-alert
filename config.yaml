@@ -59,6 +59,7 @@ stores:
 
   digistore:
     enabled: true
+    interval_seconds: 30         # 2 small API calls (was 60)
     categories: [playstation-card]           # https://digistore.co.in/product-category/console-games/playstation-card/
     search_queries: [PSN]
 
@@ -110,6 +111,7 @@ stores:
     enabled: true
     products: [playstation-gift-cards]
     fast_check: true             # also check every fast_interval_seconds (one page request)
+    fast_interval_seconds: 10    # one ~page request (was 20)
 
   hubble:
     # https://offers.myhubble.money – PlayStation only shows up while it's in stock,
@@ -117,6 +119,7 @@ stores:
     enabled: true
     categories: [GAMING]
     fast_check: true             # also check every fast_interval_seconds
+    fast_interval_seconds: 10    # one ~26 KB request (was 20)
 
   jiogames:
     # PSN cards appear in store.jiogames.com/collection/playstation when in stock and are
@@ -126,6 +129,7 @@ stores:
     collections: [playstation]
     search_queries: [playstation, psn]
     fast_check: true
+    fast_interval_seconds: 15    # was 20; in-stock cards add a cart check each, so not lower
     # A card can stay listed after it runs out (Buy Now then says "out of stock"), so each
     # listed card is double-checked like Buy Now does (guest cart, nothing is ordered).
     verify_stock: true
@@ -137,26 +141,26 @@ stores:
   # Optional per shop: search_queries (default [playstation, psn]), interval_seconds,
   # product_handles (Shopify: extra cards by the last part of their /products/... link).
   gameprex:
-    {name: GamePrex, url: "https://gameprex.in", platform: auto, interval_seconds: 120}
+    {name: GamePrex, url: "https://gameprex.in", platform: auto, interval_seconds: 60}
   simplygaming:
     {name: Simply Gaming, url: "https://www.simplygaming.in", platform: auto, interval_seconds: 120}
   hitechgamez:
-    {name: Hitech Gamez, url: "https://hitechgamez.in", platform: auto, interval_seconds: 120}
-  gamekart:
-    {name: Games Kart, url: "https://gamekart.in", platform: auto, interval_seconds: 120}
+    {name: Hitech Gamez, url: "https://hitechgamez.in", platform: auto, interval_seconds: 60}
+  gamekart:   # off: WordPress without a shop API
+    {enabled: false, name: Games Kart, url: "https://gamekart.in", platform: auto, interval_seconds: 120}
   e2zstore:
-    {name: E2Z Store, url: "https://e2zstore.com", platform: woocommerce, interval_seconds: 120}
+    {name: E2Z Store, url: "https://e2zstore.com", platform: woocommerce, interval_seconds: 60}
   nistore:
-    {name: NI Store, url: "https://www.nistore.in", platform: auto, interval_seconds: 120}
+    {name: NI Store, url: "https://www.nistore.in", platform: auto, interval_seconds: 60}
   sheenugamecenter:
-    {name: Sheenu Game Center, url: "https://sheenugamecenter.com", platform: auto, interval_seconds: 120}
+    {name: Sheenu Game Center, url: "https://sheenugamecenter.com", platform: auto, interval_seconds: 60}
   hgworld:
-    {name: HG World, url: "https://hgworld.in", platform: auto, interval_seconds: 120}
-  stanshop:
-    {name: Stan Shop, url: "https://www.stanshop.co", platform: auto, interval_seconds: 120}
+    {name: HG World, url: "https://hgworld.in", platform: auto, interval_seconds: 60}
+  stanshop:   # off: custom Next.js site, needs its own checker
+    {enabled: false, name: Stan Shop, url: "https://www.stanshop.co", platform: auto, interval_seconds: 120}
   krgkart:
-    {name: KRG Kart, url: "https://krgkart.com", platform: auto, interval_seconds: 120}
-  emartgames:
-    {name: E Mart, url: "https://emartgames.in", platform: auto, interval_seconds: 120}
-  venusgames:
-    {name: Venus Games, url: "https://venusgamesandelecs.com", platform: auto, interval_seconds: 120}
+    {name: KRG Kart, url: "https://krgkart.com", platform: auto, interval_seconds: 60}
+  emartgames:   # off: connection fails from the server
+    {enabled: false, name: E Mart, url: "https://emartgames.in", platform: auto, interval_seconds: 120}
+  venusgames:   # off: connection fails from the server
+    {enabled: false, name: Venus Games, url: "https://venusgamesandelecs.com", platform: auto, interval_seconds: 120}

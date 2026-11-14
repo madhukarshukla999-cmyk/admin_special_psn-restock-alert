@@ -828,7 +828,10 @@ def _status_of(obj, oid: str) -> tuple[str, str]:
                     k in o for k in ("order_status", "payment_status", "status")):
                 return
             for k, v in o.items():
-                if isinstance(v, str) and v and ("status" in k.lower() or k.lower() in ("state", "payment")):
+                # "state" can be an address field (state=Gujarat): only count it if it reads like a status
+                status_like = isinstance(v, str) and any(w in v.lower() for w in PAID_WORDS + FAILED_WORDS + PENDING_WORDS)
+                if isinstance(v, str) and v and ("status" in k.lower() or k.lower() == "payment"
+                                                 or (k.lower() == "state" and status_like)):
                     found.append(f"{k}={v}")
                 else:
                     walk(v, depth + 1)
@@ -897,9 +900,11 @@ async def report_order(bot, client, p: dict, chat_ids: list[str], state: str, te
         msg = ("❌ <b>GamesTheShop says this order failed or was cancelled</b>\n" + _order_lines(p) + detail +
                "\nIf money left your account, it's normally refunded automatically. Keep the UPI reference.")
     elif state == "pending":
-        msg = ("⚠️ <b>You paid, but GamesTheShop still shows this order as unpaid</b>\n" + _order_lines(p) + detail +
-               "\nSend these details and your UPI reference (UTR) to GamesTheShop support so they can match "
-               "the payment. Unmatched UPI payments are usually refunded automatically.")
+        msg = ("⏳ <b>Not paid yet, says GamesTheShop</b>\n" + _order_lines(p) + detail +
+               "\nJust paid? UPI can take a minute to reach the shop – the bot keeps checking and sends ✅ "
+               "as soon as it's recorded, or tap 🔄 again. Your UPI app says <b>successful</b> but this "
+               "still shows unpaid after ~30 min? Send these details and your UPI reference (UTR) to "
+               "GamesTheShop support; unmatched UPI payments are usually refunded automatically.")
     else:
         msg = ("❔ <b>Couldn't read this order's status from GamesTheShop</b>\n" + _order_lines(p) +
                "\nCheck <b>My orders</b> on the site. If it isn't there, send these details to their support.")

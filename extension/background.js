@@ -154,7 +154,8 @@ async function handleAlert(data) {
     await chrome.storage.session.set({ [openedKey(tab.id)]: { store: data.store, storeName: data.store_name,
       title: it.title, value: it.value || amzValue(it.title) || null, price: it.price || null, test: !!data.test, ts: Date.now() } });
     if (clickThrough) await setJob(tab.id, { store: data.store, step: "start", started: Date.now(),
-                                             title: it.title, storeName: data.store_name, test: !!data.test });
+                                             title: it.title, storeName: data.store_name, test: !!data.test,
+                                             value: it.value || amzValue(it.title) || null });   // Amazon balance limit check
     // Two checkouts loading at once fight for bandwidth on a slow connection (and both can miss
     // the payment QR), so leave a moment between click-through tabs.
     if (clickThrough && i < last) await new Promise((r) => setTimeout(r, 1200));

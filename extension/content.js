@@ -938,13 +938,20 @@ async function paytm(job) {
     }
     // fall through to the QR if the UPI form wasn't found
   }
-  // smallest visible box containing both the "Scan QR" text and an image/canvas (the QR itself)
-  const qr = await find(() => {
+  // The box holding the QR. Paytm's wording varies ("Scan QR", "Scan & Pay", "Scan the QR code"),
+  // so if no wording matches, fall back to findQrEl(): any QR-sized square image sitting next to
+  // scan / QR / UPI text. 35 s, because on a slow connection (or with two cards checking out at
+  // once) Paytm's QR can take a while to appear.
+  const qrBox = () => {
     if (!document.body) return null;
     const boxes = [...document.querySelectorAll("div, section, li")].filter((e) =>
-      e.offsetParent !== null && /scan qr/i.test(e.innerText || "") && e.querySelector("img, canvas, svg"));
-    return boxes.sort((a, b) => a.innerText.length - b.innerText.length)[0] || null;
-  }, 15000);
+      e.offsetParent !== null && /scan\s*(the\s*)?qr|scan\s*(and|&)\s*pay|upi\s*qr|qr\s*code/i.test(e.innerText || "")
+      && e.querySelector("img, canvas, svg"));
+    if (boxes.length) return boxes.sort((a, b) => a.innerText.length - b.innerText.length)[0];
+    const el = findQrEl();
+    return el ? (el.parentElement || el) : null;
+  };
+  const qr = await find(qrBox, 35000);
   if (qr) {
     highlight(qr);
     const sent = await sendQrToTelegram(qr);
@@ -953,7 +960,8 @@ async function paytm(job) {
     if (sent) watchPayment(false);          // this page shows the QR: only NEW success text counts
     return;
   }
-  return step("pay", "Paytm: payment page open – choose how to pay.", true);
+  // No QR found: say what the page actually offered, so it can be matched next time.
+  return step("pay", "Paytm: payment page open but no QR found – pay in the browser. " + frameInfo(), true);
 }
 
 // The QR as a PNG data URL if we can read it here; otherwise its address or its position on

@@ -149,8 +149,9 @@
   <label class="switch"><input type="checkbox" id="gtsWatch"><span></span><i class="lbl">Check GamesTheShop from this browser</i></label>
   <label class="field">Check every
     <div class="suffix"><input type="number" id="gtsWatchSec" min="1" step="1"><span>sec</span></div>
-    <span class="hint">1 s minimum. GamesTheShop allows about 100 requests a minute per connection. If the bot also runs on this
-      internet connection, use 2 s or more. If the shop says "too many requests" it pauses for 1 min.</span></label>
+    <span class="hint">3 s is a good start. If the shop answers "too many requests", the extension automatically
+      waits and then checks less often (up to 30 s), easing back once it's allowed again — the line below shows the
+      interval in use. The bot checks this store too, so you can also switch this off entirely.</span></label>
   <div class="muted small" id="gtsWatchInfo"></div>
 </section>
 

@@ -323,12 +323,12 @@ async function sendQrNow(msg, tab) {
   const text = lines.join("\n").slice(0, 1024);
   let j;
   if (notify) {
-    j = await tg("sendMessage", { chat_id: s.tgChatId, text });
+    j = await tg("sendMessage", { chat_id: s.tgChatId, text }, null, 3000);
     // bring the payment tab to the front on the laptop
     chrome.tabs.update(tab.id, { active: true }).catch(() => {});
     chrome.windows.update(tab.windowId, { focused: true, drawAttention: true }).catch(() => {});
   } else {
-    j = await tg("sendPhoto", { chat_id: s.tgChatId, caption: text }, { field: "photo", blob, name: "qr.png" });
+    j = await tg("sendPhoto", { chat_id: s.tgChatId, caption: text }, { field: "photo", blob, name: "qr.png" }, 3000);
   }
   if (!j.ok) throw new Error(j.description || "Telegram error");
   await startQrTimer(tab.id, {
@@ -345,13 +345,38 @@ async function sendQrNow(msg, tab) {
 const qrKey = (tabId) => "qr_" + tabId;
 const fmtLeft = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 
-async function tg(method, params, file) {
+// Telegram limits how fast ONE BOT may send, however many browsers you run. With a fleet, a
+// restock makes every browser send at once, so honour 429 (retry_after) and retry a few times.
+// A short random wait before the first try spreads the burst out.
+const TG_TRIES = 5;
+async function tg(method, params, file, spread = 0) {
   const { tgToken } = await chrome.storage.local.get({ tgToken: "" });
-  let body;
-  if (file) { body = new FormData(); for (const [k, v] of Object.entries(params)) body.append(k, v); body.append(file.field, file.blob, file.name); }
-  else body = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]));
-  const r = await fetch(`https://api.telegram.org/bot${tgToken}/${method}`, { method: "POST", body });
-  return r.json().catch(() => ({ ok: false }));
+  const build = () => {
+    if (!file) return new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]));
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(params)) fd.append(k, v);
+    fd.append(file.field, file.blob, file.name);
+    return fd;
+  };
+  if (spread) await new Promise((r) => setTimeout(r, Math.random() * spread));
+  let last = { ok: false };
+  for (let i = 0; i < TG_TRIES; i++) {
+    let r;
+    try {
+      r = await fetch(`https://api.telegram.org/bot${tgToken}/${method}`, { method: "POST", body: build() });
+    } catch {                                     // network blip: wait and try again
+      await new Promise((res) => setTimeout(res, 1000 * (i + 1)));
+      continue;
+    }
+    const j = await r.json().catch(() => ({ ok: false }));
+    if (j.ok) return j;
+    last = j;
+    const wait = r.status === 429 ? Number((j.parameters || {}).retry_after || 1) + 1
+      : r.status >= 500 ? 2 * (i + 1) : 0;        // 4xx other than 429: no point retrying
+    if (!wait) return j;
+    await new Promise((res) => setTimeout(res, wait * 1000));
+  }
+  return last;
 }
 
 async function startQrTimer(tabId, q) {
@@ -536,7 +561,7 @@ async function deviceId() {
 
 let lastHb = 0;
 async function heartbeat(force) {
-  if (!force && Date.now() - lastHb < 4 * 60 * 1000) return;          // every ~5 min
+  if (!force && Date.now() - lastHb < 14 * 60 * 1000) return;         // every ~15 min (fleet-friendly)
   const s = await chrome.storage.local.get({ topic: "", server: "https://ntfy.sh", setupDone: false, enabled: true,
     browserType: "", profileName: "", accountName: "", gtsMobile: "", gtsAccount: null, remotePaused: false,
     qrMode: "dm", tgQr: true });

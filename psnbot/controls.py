@@ -1116,16 +1116,23 @@ class Controls:
                   "callback_data": f"extqr:{k}"} for k in ("dm", "notify", "off")]
         return {"inline_keyboard": [[btn], modes, [{"text": "💻 Connected browsers", "callback_data": "extdv:list"}]]}
 
-    async def _devices_view(self, client) -> tuple[str, dict]:
+    DEV_PER_PAGE = 10        # a fleet can be 50+ browsers, so the list is paged
+
+    async def _devices_view(self, client, page: int = 0) -> tuple[str, dict]:
         from . import extension_push as ep
         devs = await ep.devices(client, self.bot.state)
         now = time.time()
+        online = sum(1 for d in devs if now - d.get("ts", 0) < 10 * 60)
+        per = self.DEV_PER_PAGE
+        pages = max(1, -(-len(devs) // per))
+        page = max(0, min(page, pages - 1))
+        shown = devs[page * per:(page + 1) * per]
         if not devs:
-            text = ("💻 <b>Connected browsers</b>\n\nNo browser has reported in the last 12 hours.\n"
-                    "<i>Browsers report every few minutes while they're open (needs extension 2.3.0+).</i>")
+            text = ("💻 <b>Connected browsers</b>\n\nNo browser has reported in the last 6 hours.\n"
+                    "<i>Browsers report every ~15 min while they're open (needs extension 2.3.0+).</i>")
         else:
             rows = []
-            for d in devs:
+            for d in shown:
                 ago = now - d.get("ts", 0)
                 dot = "🟢" if ago < 10 * 60 else "⚪"
                 seen = "now" if ago < 90 else f"{int(ago // 60)} min ago" if ago < 3600 else f"{ago / 3600:.1f} h ago"
@@ -1134,10 +1141,20 @@ class Controls:
                 rows.append(f"{dot} <b>{html.escape(d.get('account') or '?')}</b>{html.escape(mob)}\n"
                             f"    {html.escape(d.get('browser') or '?')} · profile {html.escape(d.get('profile') or '?')} · "
                             f"v{html.escape(str(d.get('version') or '?'))}\n    {state} · seen {seen}")
-            text = f"💻 <b>Connected browsers ({len(devs)})</b>\n\n" + "\n\n".join(rows)
+            head = f"💻 <b>Connected browsers ({len(devs)}, {online} online)</b>"
+            if pages > 1:
+                head += f" · page {page + 1}/{pages}"
+            text = head + "\n\n" + "\n\n".join(rows)
         kb = [[{"text": f"🚫 Revoke {(d.get('account') or '?')[:14]} · {(d.get('browser') or '?')[:8]} · {(d.get('profile') or '?')[:10]}",
-                "callback_data": f"extrv:{d['id'][:40]}"}] for d in devs[:20]]
-        kb.append([{"text": "🔄 Refresh", "callback_data": "extdv:list"},
+                "callback_data": f"extrv:{d['id'][:40]}"}] for d in shown]
+        if pages > 1:
+            nav = []
+            if page:
+                nav.append({"text": "◀ Previous", "callback_data": f"extdv:p:{page - 1}"})
+            if page < pages - 1:
+                nav.append({"text": "Next ▶", "callback_data": f"extdv:p:{page + 1}"})
+            kb.append(nav)
+        kb.append([{"text": "🔄 Refresh", "callback_data": f"extdv:p:{page}"},
                    {"text": "⛔ Revoke ALL (new code)", "callback_data": "extdv:all?"}])
         kb.append([{"text": "⬅ Back to panel", "callback_data": "pn:home"}])
         return text, {"inline_keyboard": kb}
@@ -1164,6 +1181,11 @@ class Controls:
     async def _on_devices_button(self, client, cq, cid, msg, data) -> None:
         from . import extension_push as ep
         mid = msg.get("message_id")
+        if data.startswith("extdv:p:"):
+            await self.tg.answer_callback(client, cq["id"])
+            text, kb = await self._devices_view(client, int(data.rsplit(":", 1)[1] or 0))
+            await self.tg.edit(client, cid, mid, text, kb)
+            return
         if data == "extdv:all?":
             await self.tg.answer_callback(client, cq["id"])
             await self.tg.edit(client, cid, mid,

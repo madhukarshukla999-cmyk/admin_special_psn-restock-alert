@@ -20,5 +20,8 @@ def make_client(timeout: float = 30.0, proxy: str | None = None) -> httpx.AsyncC
         headers=DEFAULT_HEADERS,
         timeout=httpx.Timeout(timeout),
         follow_redirects=True,
-        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        # Keep connections open for 60 s (httpx's default is 5 s), so stores checked every 20-60 s,
+        # Telegram and the extension push skip the TCP+TLS handshake (0.1-0.7 s to India/Telegram).
+        # More slots: ~20 stores, parallel Telegram sends and the Telegram long-poll share one client.
+        limits=httpx.Limits(max_connections=50, max_keepalive_connections=30, keepalive_expiry=60),
     )

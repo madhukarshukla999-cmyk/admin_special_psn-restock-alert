@@ -199,10 +199,12 @@ class Blinkit(Store):
             raise StoreError("Blinkit: install curl_cffi (pip install curl_cffi)")
         items: dict[str, Item] = {}
         errors = []
+        gap = self.between(1.0, 2.5)
         async with session() as s:
             for prid in prids:
                 if prid in items and items[prid].in_stock is not None:
                     continue                    # already seen as a pill on another page
+                await gap()
                 try:
                     for it in await self._check_one(s, prid):
                         if it.item_id not in items or items[it.item_id].in_stock is None:
@@ -211,7 +213,6 @@ class Blinkit(Store):
                     errors.append(str(e))
                     items.setdefault(prid, Item(store=self.id, item_id=prid, title=prid,
                                                 url=self._url(prid), in_stock=None))
-                await self.polite_pause(1.0, 2.5)
         items = list(items.values())
         if errors and len(errors) == len(prids):
             raise StoreError(errors[0])

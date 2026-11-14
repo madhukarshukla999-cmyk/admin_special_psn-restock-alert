@@ -154,8 +154,9 @@ class JioGames(Store):
 
     async def fetch(self, client):
         seen = await self._collections(client)
+        gap = self.between()
         for q in self.cfg.get("search_queries", ["playstation", "psn"]):
-            await self.polite_pause()
+            await gap()
             for p in await self._api(client, "products/", {"q": q, "page_size": 50, "page_id": "*"}):
                 if self.filter.matches(p.get("name") or "", require_card_word=False):
                     it = self._item(p)

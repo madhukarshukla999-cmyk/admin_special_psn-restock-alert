@@ -16,7 +16,9 @@ class DigiStore(Store):
         seen: dict[int, Item] = {}
         params_list = [{"category": c} for c in self.cfg.get("categories", ["playstation-card"])]
         params_list += [{"search": q} for q in self.cfg.get("search_queries", ["PSN"])]
+        gap = self.between()
         for params in params_list:
+            await gap()
             r = await self.get(client, API, params={**params, "per_page": 100},
                                headers={"Accept": "application/json"})
             try:
@@ -43,5 +45,4 @@ class DigiStore(Store):
                     price=price or None,
                     mrp=mrp or None,
                 )
-            await self.polite_pause()
         return list(seen.values())

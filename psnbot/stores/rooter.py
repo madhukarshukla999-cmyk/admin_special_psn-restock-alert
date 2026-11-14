@@ -46,7 +46,9 @@ class Rooter(Store):
 
     async def fetch(self, client):
         items: list[Item] = []
+        gap = self.between()
         for slug in self.cfg.get("products", ["playstation-gift-cards"]):
+            await gap()
             url = f"{BASE}/product/{slug}"
             r = await self.get(client, url)
             for v in parse_variations(r.text):
@@ -64,7 +66,6 @@ class Rooter(Store):
                     price=float(min(prices)) if prices else None,
                     mrp=float(max(mrps)) if mrps else None,
                 ))
-            await self.polite_pause()
         return items
 
     async def fetch_fast(self, client):

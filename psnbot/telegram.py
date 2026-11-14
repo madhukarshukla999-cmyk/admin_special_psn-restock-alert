@@ -14,6 +14,10 @@ class Telegram:
         self.token = token
         self.chat_ids = chat_ids
         self.dry_run = dry_run
+        # Messages to different people go out at the same time (an alert to 20 people used to take
+        # 20 round trips). 8 at once stays under Telegram's ~30 messages/second bot limit; a 429
+        # still waits for `retry_after` below.
+        self._sem = asyncio.Semaphore(8)
 
     # -- low level -------------------------------------------------------
     async def api(self, client: httpx.AsyncClient, method: str, payload: dict,
@@ -46,9 +50,12 @@ class Telegram:
     # -- messages --------------------------------------------------------
     async def send(self, client: httpx.AsyncClient, html: str, chat_ids: list[str] | None = None,
                    reply_markup: dict | None = None) -> bool:
-        ok = True
-        for chunk in _split(html):
-            for chat_id in (self.chat_ids if chat_ids is None else chat_ids):
+        chunks = _split(html)
+        targets = list(dict.fromkeys(self.chat_ids if chat_ids is None else chat_ids))
+
+        async def to(chat_id) -> bool:          # one person: their chunks in order
+            ok = True
+            for chunk in chunks:
                 if self.dry_run:
                     log.info("[dry-run] Telegram -> %s:\n%s", chat_id, chunk)
                     continue
@@ -56,8 +63,13 @@ class Telegram:
                            "disable_web_page_preview": True}
                 if reply_markup:
                     payload["reply_markup"] = reply_markup
-                ok &= await self.api(client, "sendMessage", payload) is not None
-        return ok
+                async with self._sem:
+                    ok &= await self.api(client, "sendMessage", payload) is not None
+            return ok
+
+        if len(targets) == 1:
+            return await to(targets[0])
+        return all(await asyncio.gather(*(to(c) for c in targets)))
 
     async def edit(self, client, chat_id, message_id, html: str, reply_markup: dict | None = None) -> None:
         payload = {"chat_id": chat_id, "message_id": message_id, "text": html,

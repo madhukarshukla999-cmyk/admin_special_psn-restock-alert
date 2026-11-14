@@ -14,7 +14,7 @@ apt-get install -y python3 python3-venv rsync
 id psnbot &>/dev/null || useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin psnbot
 
 mkdir -p "$APP_DIR/data"
-rsync -a --delete --exclude .venv --exclude data --exclude .env "$SRC_DIR/" "$APP_DIR/"
+rsync -a --delete --exclude .venv --exclude data --exclude .env --exclude .playwright "$SRC_DIR/" "$APP_DIR/"
 [[ -f "$SRC_DIR/.env" ]] && cp "$SRC_DIR/.env" "$APP_DIR/.env"
 if [[ ! -f "$APP_DIR/.env" ]]; then
   cp "$APP_DIR/.env.example" "$APP_DIR/.env"
@@ -25,6 +25,14 @@ fi
 python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
 "$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
+
+# Optional: screenshots of GTSbuy orders with a headless Chromium (GTS_SCREENSHOT=1 in .env).
+# Needs ~150-300 MB RAM while a screenshot is taken; on a 1 GB VM add swap first (see README).
+if grep -qiE '^\s*GTS_SCREENSHOT\s*=\s*(1|true|yes|on)\s*$' "$APP_DIR/.env"; then
+  echo ">> GTS_SCREENSHOT=1: installing Playwright + Chromium (first time takes a few minutes)"
+  "$APP_DIR/.venv/bin/pip" install -q "playwright>=1.49,<2"
+  PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/.playwright" "$APP_DIR/.venv/bin/python" -m playwright install --with-deps --only-shell chromium
+fi
 
 chown -R psnbot:psnbot "$APP_DIR"
 chmod 600 "$APP_DIR/.env"

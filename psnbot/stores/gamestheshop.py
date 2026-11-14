@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 from ..models import Item, StoreError
 from .base import Store
+
+log = logging.getLogger(__name__)
 
 API = "https://green-api.gamestheshop.com/storefront/products/filter"
 DETAIL = "https://green-api.gamestheshop.com/storefront/products/{}/"
@@ -27,6 +30,7 @@ class GamesTheShop(Store):
     def __init__(self, cfg, title_filter):
         super().__init__(cfg, title_filter)
         self._live: dict[str, tuple[float, bool | None]] = {}   # variant -> (checked at, live in stock)
+        self._listed: set[str] = set()      # variants the list called In Stock on the last check
 
     async def _live_stock(self, client, product_id: str, variant_id: str) -> bool | None:
         """Exactly what the product page shows: False = 'Currently Out of Stock'. None = couldn't tell."""
@@ -118,5 +122,20 @@ class GamesTheShop(Store):
                     break
                 await self.polite_pause()
         items = list(seen.values())
+        await self._start_buying(client, items)      # before the slower double-check below
         await self._verify(client, items)
         return items
+
+    async def _start_buying(self, client, items: list[Item]) -> None:
+        """Cards the search list has just started calling "In Stock": tell the bot to buy now.
+        PSN cards here can sell out in seconds, and the live double-check costs another round
+        trip. The order itself is the real check — GamesTheShop refuses it if the card is gone."""
+        listed = {i.item_id for i in items if i.in_stock and i.extra.get("product_id")}
+        fresh = [i for i in items if i.item_id in listed and i.item_id not in self._listed
+                 and self.wanted(i)]
+        self._listed = listed
+        if fresh and self.on_early_buy:
+            try:
+                await self.on_early_buy(client, fresh)
+            except Exception:  # noqa: BLE001 - buying must never break the stock check
+                log.exception("GamesTheShop: early buy failed")

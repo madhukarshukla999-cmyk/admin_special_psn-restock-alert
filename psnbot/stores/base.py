@@ -18,6 +18,10 @@ class Store:
     on_found = None
     # Set by the bot from config `only_values`: card values to track (empty = every value)
     only_values: frozenset = frozenset()
+    # Set by the bot: `await on_early_buy(client, items)` to start buying on the FIRST sign of
+    # stock, without waiting for a slower confirmation. Alerts still wait for the confirmation,
+    # so a stale listing costs a refused order, never a false alert.
+    on_early_buy = None
 
     def __init__(self, cfg: dict, title_filter: TitleFilter):
         self.cfg = cfg or {}

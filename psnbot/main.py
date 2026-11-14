@@ -162,6 +162,7 @@ class Bot:
                 continue
             store = REGISTRY[sid](scfg, self.filter)
             store.on_found = functools.partial(self._found_early, store)
+            store.on_early_buy = functools.partial(self._early_buy, store)
             store.only_values = self.only_values
             if hasattr(store, "known"):
                 store.known.update(self.state.known.get(sid, {}))
@@ -372,13 +373,17 @@ class Bot:
             else:
                 items, full = await self._check_store(client, store), True
                 if items is None:
-                    self.state.save()
+                    await self.state.save_soon()
                     return
             restocked: dict[str, list[Item]] = {}
             sold_out: dict[str, list[tuple[Item, float | None]]] = {}
             self._apply(store, items, restocked, sold_out, full_listing=full, silent=self.state.is_new)
             await self._notify(client, restocked, sold_out)
-            self.state.save()
+            # a restock must be written straight away; routine checks can wait a moment
+            if restocked or sold_out:
+                self.state.save()
+            else:
+                await self.state.save_soon()
 
     async def _found_early(self, store, client, items: list[Item]) -> None:
         """A store found in-stock cards partway through a check (it already holds the store's
@@ -394,6 +399,39 @@ class Bot:
                 self.state.save()
         except Exception:  # noqa: BLE001 - an alert problem must not abort the check
             log.exception("%s: early alert failed", store.name)
+
+    def _owner_wants(self, store_id: str, items: list[Item]) -> list[Item]:
+        return [i for i in items
+                if any(store_id not in self.users.muted(a) and self.users.wants_value(a, store_id, i.denomination)
+                       for a in self.users.admins)]
+
+    async def _early_buy(self, store, client, items: list[Item]) -> None:
+        """A store saw the first sign of stock: start the server-side checkout straight away,
+        without waiting for its slower confirmation. Alerts are unaffected (they still wait), and
+        the per-card cooldown stops the normal path ordering the same card again a moment later."""
+        if self.tg.dry_run or store.id != "gamestheshop":
+            return
+        from . import gtscheckout
+        if not gtscheckout.auto_on(self.state):
+            return
+        wants = self._owner_wants(store.id, items)
+        if not wants:
+            return
+        log.info("%s: first sign of stock, buying now: %s", store.name, ", ".join(i.title for i in wants))
+        task = asyncio.create_task(gtscheckout.auto_checkout(self, client, wants))
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
+    async def _gts_warm_loop(self, client) -> None:
+        """Keep the GamesTheShop connection open, so a restock checkout skips the handshake."""
+        from . import gtscheckout
+        while not self._stop.is_set():
+            if gtscheckout.accounts(self.state) and not self.tg.dry_run:
+                try:
+                    await gtscheckout.warm_up()
+                except Exception:  # noqa: BLE001
+                    log.debug("GamesTheShop warm-up failed", exc_info=True)
+            await _sleep(60, self._stop)
 
     async def _store_loop(self, client, store) -> None:
         stop, ev = self._stop, self._resched[store.id]
@@ -878,7 +916,8 @@ class Bot:
                      guarded(self._daily_summary_loop, "Daily summary"),
                      guarded(self._quiet_digest_loop, "Quiet-hours digest"),
                      guarded(self._purchases_loop, "Purchases"),
-                     guarded(self._gts_login_loop, "GamesTheShop logins")]
+                     guarded(self._gts_login_loop, "GamesTheShop logins"),
+                     guarded(self._gts_warm_loop, "GamesTheShop warm-up")]
             if not self.tg.dry_run and self.cfg.get("telegram_menu", True):
                 tasks.append(self.controls.run(client, stop))   # Telegram commands
             if self.auto_update:

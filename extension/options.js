@@ -101,6 +101,7 @@ async function load() {
   $("enabled").checked = s.enabled; $("autoClick").checked = s.autoClick; $("sound").checked = s.sound;
   $("maxPrice").value = s.maxPrice || 0; $("clickPayNow").checked = s.clickPayNow; $("amazonUpiQr").checked = s.amazonUpiQr;
   $("tgQr").checked = s.tgQr;
+  $("fkQr").checked = (s.fkPayBy || "qr") !== "upiid";
   $("amzBalance").checked = !!s.amzBalance; $("amzBalanceMax").value = s.amzBalanceMax ?? 5000; $("amzBalanceDaily").value = s.amzBalanceDaily ?? 5000;
   $("amzBalanceState").textContent = s.amzBalance ? "– ON" : "– off";
   const spentToday = s.amzSpent && s.amzSpent.day === new Date().toLocaleDateString("en-CA") ? s.amzSpent.total || 0 : 0;
@@ -210,6 +211,7 @@ $("save").onclick = async () => {
     amzGiftEmail: giftEmail,
     enabled: $("enabled").checked, autoClick: $("autoClick").checked, sound: $("sound").checked,
     maxPrice: Number($("maxPrice").value) || 0, clickPayNow: $("clickPayNow").checked, amazonUpiQr: $("amazonUpiQr").checked,
+    fkPayBy: $("fkQr").checked ? "qr" : "upiid",
     amzBalance: $("amzBalance").checked, amzBalanceMax: Math.max(0, Number($("amzBalanceMax").value) || 0),
     amzBalanceDaily: Math.max(0, Number($("amzBalanceDaily").value) || 0),
     tgQr: qrModeVal() !== "off", qrMode: qrModeVal() === "off" ? "dm" : qrModeVal(), amzMobile: mobileOf($("amzMobile").value), gtsPayWith: $("gtsPayWith").value,

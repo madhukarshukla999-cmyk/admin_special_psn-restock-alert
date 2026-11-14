@@ -14,6 +14,7 @@ import hashlib
 import io
 import logging
 import os
+import platform
 import socket
 import subprocess
 import tarfile
@@ -25,10 +26,19 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-WGCF = ("https://github.com/ViRb3/wgcf/releases/download/v2.3.1/wgcf_2.3.1_linux_amd64",
-        "4fb7a136aa470ece11d17949c7db07b040ec9c604742dc8680bcf1889f85d0c8")
-WIREPROXY = ("https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_linux_amd64.tar.gz",
-             "e88c1d090740373fc606c1bafd81d9a5eadc642cce5667616e20e9d7a444f51c")
+# (url, sha256) per CPU type: amd64 for Heroku/Google Cloud, arm64 for Oracle Ampere A1.
+_TOOLS = {
+    "amd64": (("https://github.com/ViRb3/wgcf/releases/download/v2.3.1/wgcf_2.3.1_linux_amd64",
+               "4fb7a136aa470ece11d17949c7db07b040ec9c604742dc8680bcf1889f85d0c8"),
+              ("https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_linux_amd64.tar.gz",
+               "e88c1d090740373fc606c1bafd81d9a5eadc642cce5667616e20e9d7a444f51c")),
+    "arm64": (("https://github.com/ViRb3/wgcf/releases/download/v2.3.1/wgcf_2.3.1_linux_arm64",
+               "710ab2d8ac145d81a4cf0c11bdb0e05914f77ae2a45f67b87e718d84b4cb7301"),
+              ("https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_linux_arm64.tar.gz",
+               "370e00bd2167960d1ecd1c3c1439715bbaa94a0a110a2040468670c9af6021b6")),
+}
+_ARCH = "arm64" if platform.machine().lower() in ("aarch64", "arm64") else "amd64"
+WGCF, WIREPROXY = _TOOLS[_ARCH]
 PORT = 40000
 PROXY_URL = f"socks5h://127.0.0.1:{PORT}"      # for curl_cffi (Blinkit)
 HTTPX_PROXY = f"socks5://127.0.0.1:{PORT}"     # for httpx (all other stores)

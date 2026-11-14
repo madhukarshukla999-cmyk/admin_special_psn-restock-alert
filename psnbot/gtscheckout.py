@@ -803,7 +803,10 @@ ORDER_PATHS = ("/orders/{oid}/", "/orders/{oid}", "/orders/detail/{oid}/", "/cus
 _ORDER_PATH: str | None = None
 _ORDER_PATH_NONE = False          # every candidate failed: ask the owner for a recording, once
 
-ORDER_POLL_EVERY = 20             # seconds between order-status reads
+ORDER_POLL_FAST = 4               # seconds between order-status reads while you're likely paying
+ORDER_FAST_FOR = 5 * 60           # ... for this long after the QR is sent
+ORDER_POLL_EVERY = 15             # then this often until the QR expires (+ grace)
+ORDER_POLL_MAX = 30               # slowest, after GamesTheShop says "too many requests"
 ORDER_WATCH_GRACE = 180           # keep watching this long after the QR expires
 
 PAID_WORDS = ("paid", "success", "completed", "complete", "confirmed", "placed", "processing",
@@ -859,6 +862,8 @@ async def order_status(acc: dict, order_id: str) -> tuple[str, str]:
             r = await _get(None, path.format(oid=order_id), headers=_auth(acc))
         except GtsError:
             continue
+        if r.status_code == 429:
+            return "limited", ""          # slow down; says nothing about the endpoint
         if r.status_code != 200:
             continue
         try:
@@ -909,11 +914,31 @@ async def check_order_now(bot, client, key: str, chat_ids: list[str]) -> str:
         raise GtsError("this payment is no longer being tracked")
     acc = accounts(bot.state).get(p.get("label")) or {}
     state, text = await order_status(acc, p.get("order_id") or p.get("paytmOrderId") or "")
+    if state == "limited":
+        state = "unknown"
+    if state in ("paid", "failed") and key in PENDING:   # done: the background watch can stop
+        PAID_SEEN[key] = dict(PENDING.pop(key))
     await report_order(bot, client, p, chat_ids, state, text)
     return state
 
 
 PAID_SEEN: dict[str, dict] = {}   # orders already reported, so the 🔄 button still works after
+
+# All open orders share one status read every ORDER_POLL_FAST seconds (~20 a minute), so several
+# QRs at once can't eat GamesTheShop's ~100 requests/minute that the stock checks need too.
+_STATUS_LOCK: asyncio.Lock | None = None
+_STATUS_LAST = 0.0
+
+
+async def _status_turn() -> None:
+    global _STATUS_LOCK, _STATUS_LAST
+    if _STATUS_LOCK is None:
+        _STATUS_LOCK = asyncio.Lock()
+    async with _STATUS_LOCK:
+        wait = _STATUS_LAST + ORDER_POLL_FAST - time.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _STATUS_LAST = time.time()
 
 
 async def watch_order(bot, client, key: str, chat_ids: list[str]) -> None:
@@ -924,23 +949,37 @@ async def watch_order(bot, client, key: str, chat_ids: list[str]) -> None:
         return
     acc = accounts(bot.state).get(p.get("label")) or {}
     oid = p.get("order_id") or p.get("paytmOrderId") or ""
-    deadline = time.time() + QR_MINUTES * 60 + ORDER_WATCH_GRACE   # a little past the QR's life
+    start = time.time()
+    deadline = start + QR_MINUTES * 60 + ORDER_WATCH_GRACE   # a little past the QR's life
     last = "unknown"
+    slow = 0.0                                            # extra wait after a 429
     while time.time() < deadline:
-        await asyncio.sleep(ORDER_POLL_EVERY)
+        # every few seconds while you're most likely paying, so the ✅ comes right after the payment
+        base = ORDER_POLL_FAST if time.time() - start < ORDER_FAST_FOR else ORDER_POLL_EVERY
+        await asyncio.sleep(max(base, slow))
         if key not in PENDING:                            # cancelled by the owner
+            return
+        await _status_turn()
+        if key not in PENDING:                            # paid via the 🔄 button meanwhile
             return
         try:
             state, text = await order_status(acc, oid)
         except Exception:  # noqa: BLE001
             log.exception("GamesTheShop order status failed")
             return
+        if state == "limited":
+            slow = min(ORDER_POLL_MAX, max(slow, base) * 2)
+            continue
+        slow = 0.0
         if state == "unknown" and _ORDER_PATH_NONE:
             return                                        # no endpoint: nothing to poll
         last = state if state != "unknown" else last
         if state in ("paid", "failed"):
             PAID_SEEN[key] = dict(p)
             PENDING.pop(key, None)
+            # the QR can't be paid (again) now: remove it, so the chat shows only the result
+            for cid, mid, _ in p.get("chat") or []:
+                await bot.tg.api(client, "deleteMessage", {"chat_id": cid, "message_id": mid})
             await report_order(bot, client, p, chat_ids, state, text)
             return
     # Time's up and it still isn't recorded. The bot can't know whether you paid, so this is a

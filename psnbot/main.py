@@ -23,7 +23,7 @@ from .controls import Controls
 from .http import make_client
 from .models import Item, StoreError, TitleFilter, parse_denomination
 from .state import State
-from .stores import REGISTRY
+from .stores import make_store
 from .channels import Mailer, html_to_text, send_whatsapp
 from .stores.base import Store
 from .telegram import Telegram
@@ -157,10 +157,10 @@ class Bot:
             scfg = scfg or {}
             if not store_enabled(sid, scfg):
                 continue
-            if sid not in REGISTRY:
+            store = make_store(sid, scfg, self.filter)
+            if store is None:
                 log.warning("Unknown store '%s' in config — skipped", sid)
                 continue
-            store = REGISTRY[sid](scfg, self.filter)
             store.on_found = functools.partial(self._found_early, store)
             store.on_early_buy = functools.partial(self._early_buy, store)
             store.only_values = self.only_values
@@ -307,7 +307,7 @@ class Bot:
         if not self.burst_active(store):
             return None
         bc = self._burst_cfg()
-        risky = store.id in ("amazon", "flipkart", "blinkit")
+        risky = store.id in ("amazon", "flipkart", "blinkit") or getattr(store, "generic", False)
         return int(bc.get("risky_seconds", 20) if risky else bc.get("seconds", 10))
 
     def set_interval(self, store_id: str, kind: str, seconds: int | None) -> None:
@@ -1105,16 +1105,16 @@ async def _list(cfg: dict) -> None:
     async with make_client() as direct, make_client(proxy=warpmod.HTTPX_PROXY) as tunneled:
         for sid, scfg in (cfg.get("stores") or {}).items():
             scfg = scfg or {}
-            if not store_enabled(sid, scfg) or sid not in REGISTRY:
+            if not store_enabled(sid, scfg) or (store := make_store(sid, scfg, filt)) is None:
                 continue
-            store = REGISTRY[sid](scfg, filt)
             client = tunneled if sid in via else direct
             try:
                 items = await store.fetch(client)
             except Exception as e:  # noqa: BLE001
                 print(f"\n== {store.name}: ERROR {e}")
                 continue
-            print(f"\n== {store.name}: {len(items)} listings" + (" (via WARP)" if sid in via else ""))
+            platform = f" [{store.platform}]" if getattr(store, "generic", False) else ""
+            print(f"\n== {store.name}{platform}: {len(items)} listings" + (" (via WARP)" if sid in via else ""))
             for it in sorted(items, key=_sort_key):
                 flag = {True: "IN STOCK ", False: "out      ", None: "unknown  "}[it.in_stock]
                 print(f"  {flag} {_rupees(it.price):>9}  {it.title}\n            {it.url}")

@@ -460,8 +460,7 @@ def _pay_buttons(key: str, vpa: str) -> dict:
     row = [{"text": "❌ Cancel", "callback_data": f"gp:x:{key}"}]
     if vpa:
         row.insert(0, {"text": "📲 Send to my UPI ID", "callback_data": f"gp:upi:{key}"})
-    return {"inline_keyboard": [row, [{"text": "🔄 Check if the shop got the payment",
-                                       "callback_data": f"gp:chk:{key}"}]]}
+    return {"inline_keyboard": [row, [{"text": "🔄 I paid – check now", "callback_data": f"gp:chk:{key}"}]]}
 
 
 async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: list[str], secs: float | None = None) -> str:
@@ -904,7 +903,26 @@ async def report_order(bot, client, p: dict, chat_ids: list[str], state: str, te
     else:
         msg = ("❔ <b>Couldn't read this order's status from GamesTheShop</b>\n" + _order_lines(p) +
                "\nCheck <b>My orders</b> on the site. If it isn't there, send these details to their support.")
-    await bot.tg.send(client, msg, chat_ids=chat_ids)
+    await bot.tg.send(client, msg, chat_ids=chat_ids)          # the result first, never held up
+    from . import gtsshot
+    if gtsshot.enabled():                                     # then a screenshot of the order page
+        task = asyncio.create_task(_send_order_shot(bot, client, p, chat_ids))
+        bot._bg.add(task)
+        task.add_done_callback(bot._bg.discard)
+
+
+async def _send_order_shot(bot, client, p: dict, chat_ids: list[str]) -> None:
+    import html as _html
+    from . import gtsshot
+    acc = accounts(bot.state).get(p.get("label")) or {}
+    png, note = await gtsshot.order_page(acc, p.get("order_id") or "", (bot.cfg or {}).get("gts_orders_url"),
+                                         bot.state.settings)
+    head = f"📸 {_html.escape(str(p.get('label', '')))} · {_html.escape(str(p.get('title', '')))}"
+    for cid in chat_ids:
+        if png:
+            await send_photo(client, bot.tg.token, cid, png, f"{head}\n<i>{_html.escape(note)}</i>")
+        else:
+            await bot.tg.send(client, f"{head}\n📸 No screenshot: {_html.escape(note)}", chat_ids=[cid])
 
 
 async def check_order_now(bot, client, key: str, chat_ids: list[str]) -> str:
@@ -918,6 +936,8 @@ async def check_order_now(bot, client, key: str, chat_ids: list[str]) -> str:
         state = "unknown"
     if state in ("paid", "failed") and key in PENDING:   # done: the background watch can stop
         PAID_SEEN[key] = dict(PENDING.pop(key))
+        for cid, mid, _ in p.get("chat") or []:          # and the QR can't be paid any more
+            await bot.tg.api(client, "deleteMessage", {"chat_id": cid, "message_id": mid})
     await report_order(bot, client, p, chat_ids, state, text)
     return state
 

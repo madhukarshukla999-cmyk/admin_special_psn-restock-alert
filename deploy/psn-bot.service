@@ -7,6 +7,8 @@ Wants=network-online.target
 Type=simple
 User=psnbot
 WorkingDirectory=/opt/psn-stock-bot
+# headless Chromium for GTSbuy screenshots (only installed with GTS_SCREENSHOT=1)
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/psn-stock-bot/.playwright
 ExecStart=/opt/psn-stock-bot/.venv/bin/python -m psnbot -c /opt/psn-stock-bot/config.yaml
 Restart=always
 RestartSec=30

@@ -30,6 +30,7 @@ python3 -m venv "$APP_DIR/.venv"
 # Needs ~150-300 MB RAM while a screenshot is taken; on a 1 GB VM add swap first (see README).
 if grep -qiE '^\s*GTS_SCREENSHOT\s*=\s*(1|true|yes|on)\s*$' "$APP_DIR/.env"; then
   echo ">> GTS_SCREENSHOT=1: installing Playwright + Chromium (first time takes a few minutes)"
+  apt-get install -y libatomic1          # Playwright's bundled Node needs it; minimal images lack it
   "$APP_DIR/.venv/bin/pip" install -q "playwright>=1.49,<2"
   PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/.playwright" "$APP_DIR/.venv/bin/python" -m playwright install --with-deps --only-shell chromium
 fi

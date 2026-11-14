@@ -67,6 +67,9 @@ async function connect() {
       if (ev.event !== "message") return;
       lastMsg = Math.max(lastMsg, ev.time || 0);
       const data = JSON.parse(ev.message);
+      // one-off commands (🔄 refresh): only fresh ones, never replayed from the catch-up
+      if (data && data.v === 1 && data.type === "action")
+        return (data.ts || 0) * 1000 >= Date.now() - 60000 ? handleAction(data).catch(() => {}) : undefined;
       // control: only fresh ones live; older ones from the 2-min catch-up are covered by syncControl
       if (data && data.v === 1 && data.type === "control")
         return (data.ts || 0) * 1000 >= wsOpenedAt - 1000 ? applyControl(data, true) : undefined;
@@ -214,7 +217,9 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === "watch?" && sender.tab) {
     chrome.storage.local.get(qrKey(sender.tab.id)).then((o) => {
       const q = o[qrKey(sender.tab.id)];
-      reply(q && q.expires > Date.now() ? { expires: q.expires } : null);
+      // while the tab is being refreshed at expiry, keep watching: you may have paid after all
+      const live = q && (q.expires > Date.now() || refreshing.has(sender.tab.id));
+      reply(live ? { expires: Math.max(q.expires, Date.now() + 30000) } : null);
     });
     return true;
   }
@@ -328,20 +333,23 @@ async function sendQrNow(msg, tab) {
     ...(notify ? [] : ["Same phone: save the image → UPI app → Scan QR → gallery."]),
   ];
   const text = lines.join("\n").slice(0, 1024);
+  // 🔄 after paying on the phone: the bot tells this browser to reload the tab and screenshot it
+  const reply_markup = JSON.stringify({ inline_keyboard: [[{ text: "🔄 I paid – refresh & screenshot",
+                                                             callback_data: `xr:${await deviceId()}:${tab.id}` }]] });
   let j;
   if (notify) {
-    j = await tg("sendMessage", { chat_id: s.tgChatId, text }, null, 3000);
+    j = await tg("sendMessage", { chat_id: s.tgChatId, text, reply_markup }, null, 3000);
     // bring the payment tab to the front on the laptop
     chrome.tabs.update(tab.id, { active: true }).catch(() => {});
     chrome.windows.update(tab.windowId, { focused: true, drawAttention: true }).catch(() => {});
   } else {
-    j = await tg("sendPhoto", { chat_id: s.tgChatId, caption: text }, { field: "photo", blob, name: "qr.png" }, 3000);
+    j = await tg("sendPhoto", { chat_id: s.tgChatId, caption: text, reply_markup }, { field: "photo", blob, name: "qr.png" }, 3000);
   }
   if (!j.ok) throw new Error(j.description || "Telegram error");
   await startQrTimer(tab.id, {
     msgId: j.result.message_id, chatId: s.tgChatId, caption: text, kind: notify ? "text" : "photo",
     expires: Date.now() + timeoutMs, title: job.title || "PSN card", storeName, amount,
-    order: msg.order || "", account: s.browserName || accName, mobile, test: !!job.test,
+    order: msg.order || "", account: s.browserName || accName, mobile, test: !!job.test, markup: reply_markup,
   });
   await log(`${notify ? "Telegram notified (pay in browser)" : `QR sent to Telegram (${how})`}: ${storeName} ${job.title || ""} · ${s.browserName || "this browser"}`);
   return true;
@@ -402,15 +410,91 @@ function resultLines(q) {
           ...(q.order ? [`🧾 Order: ${q.order}`] : []), `🕒 ${new Date().toLocaleTimeString()}`];
 }
 
-// Time is up and nothing was paid: delete the QR from Telegram.
+// ---- reload a payment tab and screenshot it (🔄 button under the QR, and once at QR expiry) ----
+// A payment made on the phone doesn't always make the laptop's Paytm page move on, so the page
+// can still show the QR after you paid. A reload asks the shop again; the content script then
+// spots "payment successful" on the fresh page and the usual ✅ report (with screenshot) goes
+// out. If it doesn't, the screenshot below shows what the page says.
+const refreshing = new Set();
+
+function waitLoaded(tabId, ms) {
+  return new Promise((resolve) => {
+    const done = (ok) => { chrome.tabs.onUpdated.removeListener(on); clearTimeout(t); resolve(ok); };
+    const on = (id, info) => { if (id === tabId && info.status === "complete") done(true); };
+    const t = setTimeout(() => done(false), ms);
+    chrome.tabs.onUpdated.addListener(on);
+  });
+}
+
+// Returns "reported" (the ✅/❌ report went out after the reload), "shot" (screenshot sent),
+// "text" (no screenshot permission), or "gone" (tab closed).
+async function refreshTab(tabId, why) {
+  if (refreshing.has(tabId)) return "busy";
+  refreshing.add(tabId);
+  try {
+    const s = await chrome.storage.local.get({ tgChatId: "" });
+    const before = (await chrome.storage.local.get(qrKey(tabId)))[qrKey(tabId)];
+    const opened = (await chrome.storage.session.get(openedKey(tabId)))[openedKey(tabId)];
+    const chatId = (before && before.chatId) || s.tgChatId;
+    const lines = before ? resultLines(before) : opened ? [`${opened.storeName}: ${opened.title}`] : [];
+    let tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) {
+      if (why === "button" && chatId)
+        await tg("sendMessage", { chat_id: chatId, text: ["⚠️ That payment tab was closed, nothing to refresh.", ...lines].join("\n") });
+      return "gone";
+    }
+    await log(`Refreshing the payment tab (${why === "button" ? "🔄 from Telegram" : "QR expired"}): ${(before || opened || {}).title || tab.title}`);
+    await chrome.tabs.reload(tabId);
+    await waitLoaded(tabId, 20000);
+    await new Promise((r) => setTimeout(r, 3000));     // the page's own "payment successful" check
+    const after = (await chrome.storage.local.get(qrKey(tabId)))[qrKey(tabId)];
+    if (before && !after) return "reported";            // the fresh page showed the result: ✅/❌ sent
+    if (!chatId) return "text";
+    tab = await chrome.tabs.get(tabId).catch(() => tab);
+    let shot = null;
+    if (await chrome.permissions.contains({ origins: ["<all_urls>"] })) shot = await screenshotCrop(tab, null).catch(() => null);
+    const text = [why === "button" ? "🔄 Refreshed – this is what the payment page shows now"
+                                   : "⌛ QR time is up – refreshed the page once, this is what it shows",
+                  ...lines, "No “payment successful” on the page yet. If you paid, it can take a moment: tap 🔄 again."]
+                 .join("\n").slice(0, 1024);
+    if (shot) { await tg("sendPhoto", { chat_id: chatId, caption: text }, { field: "photo", blob: shot, name: "page.png" }); return "shot"; }
+    await tg("sendMessage", { chat_id: chatId, text: text + "\n(no screenshot: press 'Allow screenshots' in Options)" });
+    return "text";
+  } catch (e) {
+    await log(`Refreshing the payment tab failed: ${e.message || e}`);
+    return "error";
+  } finally {
+    refreshing.delete(tabId);
+  }
+}
+
+// A one-off command from the bot (🔄 button). Only for this browser.
+async function handleAction(d) {
+  if (d.device !== await deviceId()) return;
+  if (d.action === "refresh" && Number.isInteger(d.tab)) await refreshTab(d.tab, "button");
+}
+
+// Time is up: reload the tab once (you may have paid and the page just didn't move on), then
+// delete the QR from Telegram if it still isn't paid.
+const expiring = new Set();
 async function expireQr(tabId) {
-  const q = (await chrome.storage.local.get(qrKey(tabId)))[qrKey(tabId)];
-  if (!q) return;
-  await chrome.storage.local.remove(qrKey(tabId));
-  await tg("deleteMessage", { chat_id: q.chatId, message_id: q.msgId });
-  await tg("sendMessage", { chat_id: q.chatId, disable_notification: true,
-    text: [`⌛ ${q.test ? "TEST · " : ""}QR expired – not paid in time${q.kind === "text" ? "" : ", deleted"}.`, ...resultLines(q)].join("\n") });
-  await log(`QR expired (deleted from Telegram): ${q.title} · ${q.account || "this browser"}`);
+  if (expiring.has(tabId)) return;                     // alarm + countdown tick can both fire
+  const q0 = (await chrome.storage.local.get(qrKey(tabId)))[qrKey(tabId)];
+  if (!q0) return;
+  expiring.add(tabId);
+  try {
+    const res = await refreshTab(tabId, "expired");
+    if (res === "reported") return;                     // it was paid after all: ✅ already sent
+    const q = (await chrome.storage.local.get(qrKey(tabId)))[qrKey(tabId)];
+    if (!q) return;
+    await chrome.storage.local.remove(qrKey(tabId));
+    await tg("deleteMessage", { chat_id: q.chatId, message_id: q.msgId });
+    await tg("sendMessage", { chat_id: q.chatId, disable_notification: true,
+      text: [`⌛ ${q.test ? "TEST · " : ""}QR expired – not paid in time${q.kind === "text" ? "" : ", deleted"}.`, ...resultLines(q)].join("\n") });
+    await log(`QR expired (deleted from Telegram): ${q.title} · ${q.account || "this browser"}`);
+  } finally {
+    expiring.delete(tabId);
+  }
 }
 
 // Live countdown in the caption (runs on the 30 s keep-alive alarm).
@@ -419,8 +503,9 @@ async function tickQrs() {
     const left = q.expires - Date.now();
     if (left <= 0) { await expireQr(tabId); continue; }
     const cap = q.caption.replace(/^⏳ .*$/m, `⏳ ${fmtLeft(left)} LEFT – ${q.kind === "text" ? "expires" : "deleted"} at ${new Date(q.expires).toLocaleTimeString()} if not paid.`);
-    if (q.kind === "text") await tg("editMessageText", { chat_id: q.chatId, message_id: q.msgId, text: cap });
-    else await tg("editMessageCaption", { chat_id: q.chatId, message_id: q.msgId, caption: cap });
+    const keep = q.markup ? { reply_markup: q.markup } : {};     // an edit without it drops the 🔄 button
+    if (q.kind === "text") await tg("editMessageText", { chat_id: q.chatId, message_id: q.msgId, text: cap, ...keep });
+    else await tg("editMessageCaption", { chat_id: q.chatId, message_id: q.msgId, caption: cap, ...keep });
   }
 }
 

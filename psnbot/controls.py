@@ -707,6 +707,16 @@ class Controls:
                 return
             await self._on_devices_button(client, cq, cid, msg, data)
             return
+        if data.startswith("xr:"):                  # 🔄 under a QR the browser extension sent
+            if not self.users.is_admin(cid):
+                await self.tg.answer_callback(client, cq["id"], "Not available")
+                return
+            from . import extension_push as ep
+            _, dev, tab = (data.split(":", 2) + ["", ""])[:3]
+            ok = tab.isdigit() and await ep.publish_action(client, self.bot.state, "refresh", device=dev, tab=int(tab))
+            await self.tg.answer_callback(client, cq["id"], "🔄 Refreshing that tab – screenshot follows" if ok
+                                          else "Couldn't reach the browser")
+            return
         if data.startswith("extqr:") and data[6:] in ("dm", "notify", "off"):
             if not self.users.is_admin(cid):
                 await self.tg.answer_callback(client, cq["id"], "Not available")

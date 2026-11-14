@@ -314,12 +314,60 @@ function amzSkipOffer() {
 
 const amzOnOffers = () => /\/(checkout|gp\/buy)\/.*\/offers\b/.test(location.pathname);
 
+// ---- Amazon Pay balance: buy automatically (Options → "Buy with Amazon Pay balance", off by default)
+// Spends real money without asking, so every limit below must pass or nothing is pressed.
+const rupees = (s) => { const m = String(s || "").match(/₹\s?([\d,]+(?:\.\d{1,2})?)/); return m ? Number(m[1].replace(/,/g, "")) : null; };
+const todayKey = () => new Date().toLocaleDateString("en-CA");          // YYYY-MM-DD, local time
+
+// The "Use your ₹1,628.50 Amazon Pay Balance" row: { box, amount, checked } or null
+function amzBalanceRow() {
+  const t = textEl(/^use your\s*₹?\s?[\d,]+(\.\d+)?\s*amazon pay balance/i, "span, label, div, a");
+  if (!t) return null;
+  let box = t, cb = null;
+  for (let i = 0; i < 6 && box && !cb; i++, box = box.parentElement)
+    cb = box.querySelector('input[type=checkbox], [role=checkbox]');
+  if (!cb) return null;
+  const checked = cb.type === "checkbox" ? cb.checked : cb.getAttribute("aria-checked") === "true";
+  return { box: cb, amount: rupees(t.innerText), checked };
+}
+
+// review page: the order is paid only from the balance (no UPI / card / COD part)
+function amzBalanceOnly() {
+  const ch = amzChangePayment();
+  const txt = (ch ? boxText(ch) : document.body.innerText) || "";
+  return /amazon pay balance/i.test(txt) &&
+    !/scan and pay|upi|card ending|credit card|debit card|net ?banking|emi|pay on delivery|cash on delivery/i.test(txt);
+}
+const amzPlaceOrder = () => {
+  const t = amzButtons(/^place your order( and pay)?$/i)[0];
+  return t || null;
+};
+function amzOrderTotal() {
+  const m = (document.body.innerText || "").match(/order total\s*:?\s*\n?\s*₹\s?([\d,]+(?:\.\d{1,2})?)/i);
+  return m ? Number(m[1].replace(/,/g, "")) : null;
+}
+
+// All limits, or the reason to stop. `value` = the card's face value from the alert.
+async function amzBalanceCheck(job, total) {
+  const o = await chrome.storage.local.get({ amzBalanceMax: 5000, amzBalanceDaily: 5000, amzSpent: {} });
+  const spent = o.amzSpent.day === todayKey() ? o.amzSpent.total || 0 : 0;
+  const value = Number(job.value) || (String(job.title || "").match(/(?:₹|rs\.?\s?|inr\s?)([\d,]{3,6})/i) || [])[1]?.replace(/,/g, "");
+  if (!total) return "couldn't read the order total";
+  if (!amzBalanceOnly()) return "the order isn't paid only from Amazon Pay balance";
+  if (value && total > Number(value) + 1) return `total ₹${total} is more than the card's ₹${value} (quantity 2, or a different item?)`;
+  if (o.amzBalanceMax && total > o.amzBalanceMax) return `total ₹${total} is over your ₹${o.amzBalanceMax} per-order limit`;
+  if (o.amzBalanceDaily && spent + total > o.amzBalanceDaily)
+    return `₹${spent} already spent today; ₹${total} more is over your ₹${o.amzBalanceDaily} daily limit`;
+  return null;
+}
+
 // Press "Use this payment method" until the page moves on. Amazon shows the button twice (top of
 // the page and under the list); one copy can be covered or not wired up yet, so try each one,
 // the one really on top first (then form submit). Returns "moved" (new URL), "next" (review page
 // / offers page drawn in place) or the list of what was tried.
 async function amzPressUse(first) {
-  const advanced = () => moved() ? "moved" : (amzOnOffers() || (amzPayWithUpi() && amzQrChosen())) ? "next" : null;
+  const advanced = () => moved() ? "moved"
+    : (amzOnOffers() || (amzPayWithUpi() && amzQrChosen()) || (amzPlaceOrder() && amzBalanceOnly())) ? "next" : null;
   const tried = [];
   const seen = new Set();
   for (let i = 0; i < 6; i++) {
@@ -387,9 +435,9 @@ function amzAlertText() {
 }
 
 async function amazonCheckout(job) {
-  const o = await chrome.storage.local.get({ amazonUpiQr: true });
+  const o = await chrome.storage.local.get({ amazonUpiQr: true, amzBalance: false });
   const manual = "Amazon: checkout open – pick how to pay and finish it yourself.";
-  if (!o.amazonUpiQr) return step("checkout", manual, true);
+  if (!o.amazonUpiQr && !(o.amzBalance && job.step !== "nobalance")) return step("checkout", manual, true);
   if (job.step === "paid") {                            // after "Pay with UPI": the QR page
     const ok = await find(() => highlightQr(), 15000);
     if (ok) return amazonQrReady();
@@ -398,11 +446,16 @@ async function amazonCheckout(job) {
 
   // 1) payment-method page: choose "Scan and Pay with UPI", then "Use this payment method"
   // 2) review page: press "Pay with UPI" (only then – never "Place your order" for card/COD)
+  const bal = (await chrome.storage.local.get({ amzBalance: false })).amzBalance && job.step !== "nobalance";
   const what = await find(() => {
     // the Prime/offers page (…/checkout/p/…/offers): never pick a payment here, even if the old
     // payment list is still on screen for a moment while Amazon swaps the page in place
     if (amzOnOffers()) return amzSkipOffer() ? "offer" : null;
     if (amzSkipOffer()) return "offer";
+    if (bal && amzPlaceOrder() && amzBalanceOnly()) return "place";
+    // balance was used but the review page shows another way to pay too: stop (no Change loop)
+    if (bal && job.step === "balance" && amzPlaceOrder()) return "notonly";
+    if (bal && amzBalanceRow()) return "balance";
     if (amzPayWithUpi() && amzQrChosen()) return "pay";
     if (amzUpiQrOption()) return "choose";
     if (frameState.chosen) return "frame";
@@ -443,6 +496,52 @@ async function amazonCheckout(job) {
       `${e.name ? "[name=" + e.name + "]" : ""}${onTop(e) ? ":top" : ":covered"}${inDialog(e) ? ":popup" : ""}`);
     return step("checkout", "Amazon: stuck on the Prime/offer page – press 'No Thanks' yourself, then pay. " +
                 `[tried ${JSON.stringify(seen)}] ` + amzDiag(), true);
+  }
+
+  if (what === "balance") {
+    // payment page: tick "Use your ₹… Amazon Pay Balance", then "Use this payment method"
+    const mine = await chrome.runtime.sendMessage({ type: "claim", what: "amzbal" + location.pathname }).catch(() => true);
+    if (!mine) return;
+    const row = amzBalanceRow();
+    await step("balance", `Amazon: payment page – using Amazon Pay balance (₹${row.amount ?? "?"})…`);
+    if (!row.checked) { realClick(row.box); await sleep(800); }
+    // only the balance must be enough: "Use this payment method" stays grey if it doesn't cover it
+    const use = await find(() => { const r = amzBalanceRow(); return r && r.checked && amzUseThisPayment(); }, 6000);
+    if (!use) {
+      const r = amzBalanceRow();
+      if (r && r.checked) { realClick(r.box); await sleep(500); }        // untick it again
+      await step("nobalance", `Amazon: Amazon Pay balance (₹${row.amount ?? "?"}) doesn't cover this order – using UPI QR instead.`);
+      return amazonCheckout({ ...job, step: "nobalance" });
+    }
+    const res = await amzPressUse(use);
+    if (res === "moved") return;
+    if (res === "next") return amazonCheckout({ ...job, step: "balance" });
+    if (await amzOfferAfter(job)) return;
+    return step("checkout", AMZ_STUCK + `[tried ${JSON.stringify(res)}] ` + amzDiag(), true);
+  }
+
+  if (what === "notonly")
+    return step("checkout", "Amazon: NOT ordering – the review page doesn't show the order paid only from Amazon Pay balance. " +
+                "Check the payment and place it yourself. " + amzDiag(), true);
+
+  if (what === "place") {
+    // review page, paid from the balance only: check every limit, then press "Place your order" ONCE
+    const mine = await chrome.runtime.sendMessage({ type: "claim", what: "amzplace" + location.pathname }).catch(() => true);
+    if (!mine) return;
+    await sleep(600);                                 // totals finish drawing
+    const total = amzOrderTotal();
+    const stop = await amzBalanceCheck(job, total);
+    if (stop) return step("checkout", `Amazon: NOT ordering – ${stop}. Check the order and place it yourself if it's right.`, true);
+    if (job.test)
+      return step("checkout", `Amazon: TEST – would now press 'Place your order' (₹${total} from Amazon Pay balance). Not pressed in a test.`, true);
+    const btn = amzPlaceOrder();
+    const o = await chrome.storage.local.get({ amzSpent: {} });
+    const day = todayKey(), before = o.amzSpent.day === day ? o.amzSpent.total || 0 : 0;
+    await chrome.storage.local.set({ amzSpent: { day, total: before + total } });   // counted before the click
+    await step("placing", `Amazon: placing the order – ₹${total} from Amazon Pay balance…`);
+    realClick(btn);                                   // one press only: a second could order twice
+    if (await waitFor(() => moved() || !amzPlaceOrder(), 15000)) return;   // thank-you page → ✅ + screenshot
+    return step("checkout", "Amazon: pressed 'Place your order' but the page didn't change – check Your Orders before trying again (it may have gone through).", true);
   }
 
   if (what === "pay") {

@@ -120,6 +120,18 @@
   </details>
   <label class="switch"><input type="checkbox" id="clickPayNow"><span></span><i class="lbl">GamesTheShop: click <b>Pay Now</b> (Paytm QR)</i></label>
   <label class="switch"><input type="checkbox" id="amazonUpiQr"><span></span><i class="lbl">Amazon: pay with <b>UPI QR</b></i></label>
+  <details class="card-details" id="amzBalanceBox">
+    <summary>💰 Amazon: buy automatically with <b>Amazon Pay balance</b> <span id="amzBalanceState" class="muted small"></span></summary>
+    <label class="switch"><input type="checkbox" id="amzBalance"><span></span><i class="lbl">Use my Amazon Pay balance and <b>place the order automatically</b></i></label>
+    <div class="banner warn small">⚠ This <b>spends your balance without asking</b>. It only presses <b>Place your order</b> when the balance pays the <b>whole</b> order, the total is not more than the card's value, and it's within the limits below. Otherwise it stops and tells you (or uses the UPI QR if the balance is too low). Tests (<code>/extension test</code>) never press it.</div>
+    <div class="grid2">
+      <label class="field">Max per order ₹ <span class="hint inline">0 = no limit</span>
+        <input type="number" id="amzBalanceMax" min="0" step="100"></label>
+      <label class="field">Max per day ₹ <span class="hint inline">0 = no limit</span>
+        <input type="number" id="amzBalanceDaily" min="0" step="500"></label>
+    </div>
+    <p class="muted small">After each order: <b>✅ PURCHASE COMPLETE</b> with a screenshot in Telegram (needs <b>Allow screenshots</b> above). <span id="amzSpentToday"></span></p>
+  </details>
   <label class="field">Card values <span class="hint inline">only these are opened; empty = every value</span>
     <input type="text" id="onlyValues" inputmode="numeric" placeholder="e.g. 1000, 2000, 3000, 4000, 5000">
     <span class="hint">Applies to every alert, the GamesTheShop and Amazon checks, and the amount picked on e-gift cards (the highest of these). A card whose value can't be read is still opened.</span></label>

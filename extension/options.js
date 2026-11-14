@@ -3,6 +3,7 @@ const DEFAULTS = {
   topic: "", server: "https://ntfy.sh", enabled: true, autoClick: true, sound: true, maxPrice: 0, clickPayNow: true,
   amazonUpiQr: true, upiId: "", tgQr: true, tgToken: "", tgChatId: "", browserName: "", gtsMobile: "", qrTimeoutSec: 120, qrMode: "dm", amzMobile: "", gtsPayWith: "upi", cardLast4: "", cardNumber: "", cardExpiry: "", cardName: "", cardCvv: "", cardAutoPay: true,
   browserType: "", profileName: "", accountName: "", setupDone: false, remotePaused: false,
+  amzBalance: false, amzBalanceMax: 5000, amzBalanceDaily: 5000, amzSpent: {},
   stores: { gamestheshop: true, amazon: true, flipkart: true, others: true },
   // keep in step with AMZ_WATCH_DEFAULTS in background.js
   amzWatch: false, amzWatchSec: 15, amzWatchInfo: "", amzGiftEmail: "",
@@ -100,6 +101,10 @@ async function load() {
   $("enabled").checked = s.enabled; $("autoClick").checked = s.autoClick; $("sound").checked = s.sound;
   $("maxPrice").value = s.maxPrice || 0; $("clickPayNow").checked = s.clickPayNow; $("amazonUpiQr").checked = s.amazonUpiQr;
   $("tgQr").checked = s.tgQr;
+  $("amzBalance").checked = !!s.amzBalance; $("amzBalanceMax").value = s.amzBalanceMax ?? 5000; $("amzBalanceDaily").value = s.amzBalanceDaily ?? 5000;
+  $("amzBalanceState").textContent = s.amzBalance ? "– ON" : "– off";
+  const spentToday = s.amzSpent && s.amzSpent.day === new Date().toLocaleDateString("en-CA") ? s.amzSpent.total || 0 : 0;
+  $("amzSpentToday").textContent = `Spent from the balance today: ₹${spentToday}.`;
   const mode = !s.tgQr ? "off" : s.qrMode || "dm";
   for (const r of document.querySelectorAll('input[name="qrMode"]')) r.checked = r.value === mode;
   $("amzMobile").value = s.amzMobile || ""; $("gtsPayWith").value = s.gtsPayWith || "upi"; $("cardLast4").value = s.cardLast4 || "";
@@ -205,6 +210,8 @@ $("save").onclick = async () => {
     amzGiftEmail: giftEmail,
     enabled: $("enabled").checked, autoClick: $("autoClick").checked, sound: $("sound").checked,
     maxPrice: Number($("maxPrice").value) || 0, clickPayNow: $("clickPayNow").checked, amazonUpiQr: $("amazonUpiQr").checked,
+    amzBalance: $("amzBalance").checked, amzBalanceMax: Math.max(0, Number($("amzBalanceMax").value) || 0),
+    amzBalanceDaily: Math.max(0, Number($("amzBalanceDaily").value) || 0),
     tgQr: qrModeVal() !== "off", qrMode: qrModeVal() === "off" ? "dm" : qrModeVal(), amzMobile: mobileOf($("amzMobile").value), gtsPayWith: $("gtsPayWith").value,
     cardNumber: $("cardNumber").value.replace(/\D/g, ""), cardExpiry: $("cardExpiry").value.replace(/\D/g, "").slice(0, 4),
     cardName: $("cardName").value.trim(), cardCvv: $("cardCvv").value.replace(/\D/g, ""), cardAutoPay: $("cardAutoPay").checked,

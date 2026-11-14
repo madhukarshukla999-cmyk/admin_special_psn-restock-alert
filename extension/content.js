@@ -313,6 +313,16 @@ function amzSkipOffer() {
   return enabled(el) ? el : null;
 }
 
+const amzOnOffers = () => /\/(checkout|gp\/buy)\/.*\/offers\b/.test(location.pathname);
+
+// After a step that didn't work: did Amazon put a Prime/offers page in between? Then decline it
+// and carry on, instead of giving up.
+async function amzOfferAfter(job) {
+  if (!(await waitFor(() => amzOnOffers() || amzSkipOffer(), 4000))) return false;
+  await amazonCheckout({ ...job, step: "offer" });
+  return true;
+}
+
 // Amazon's own error / notice text on the page (e.g. why Add to Cart didn't work)
 function amzAlertText() {
   const el = [...document.querySelectorAll(".a-alert-content, [role=alert], #attach-warning-display, .a-color-error")]
@@ -333,6 +343,9 @@ async function amazonCheckout(job) {
   // 1) payment-method page: choose "Scan and Pay with UPI", then "Use this payment method"
   // 2) review page: press "Pay with UPI" (only then – never "Place your order" for card/COD)
   const what = await find(() => {
+    // the Prime/offers page (…/checkout/p/…/offers): never pick a payment here, even if the old
+    // payment list is still on screen for a moment while Amazon swaps the page in place
+    if (amzOnOffers()) return amzSkipOffer() ? "offer" : null;
     if (amzSkipOffer()) return "offer";
     if (amzPayWithUpi() && amzQrChosen()) return "pay";
     if (amzUpiQrOption()) return "choose";
@@ -371,7 +384,9 @@ async function amazonCheckout(job) {
     await step("chosen", "Amazon: UPI QR chosen – clicking 'Use this payment method'…");
     await sleep(400);
     if (!frameState.pressed && !moved()) { const use = amzUseThisPayment(); if (use) realClick(use); }
-    if (await find(() => amzPayWithUpi() && amzQrChosen(), 15000)) return amazonCheckout({ ...job, step: "chosen" });
+    if (await find(() => amzPayWithUpi() && amzQrChosen() || amzOnOffers(), 15000))
+      return amazonCheckout({ ...job, step: "chosen" });
+    if (await amzOfferAfter(job)) return;
     return step("checkout", AMZ_STUCK + amzDiag(), true);
   }
   if (what === "choose") {
@@ -380,11 +395,16 @@ async function amazonCheckout(job) {
     if (!mine) return;
     await step("choosing", "Amazon: payment page – choosing 'Scan and Pay with UPI'…");
     const use = await amzChooseUpi();
-    if (!use) return step("checkout", "Amazon: couldn't select 'Scan and Pay with UPI' – tap it, then 'Use this payment method'. " + amzDiag(), true);
+    if (!use) {
+      if (await amzOfferAfter(job)) return;           // the list was swapped for a Prime/offers page
+      return step("checkout", "Amazon: couldn't select 'Scan and Pay with UPI' – tap it, then 'Use this payment method'. " + amzDiag(), true);
+    }
     await step("chosen", "Amazon: UPI QR chosen – clicking 'Use this payment method'…");
     realClick(use);
     // review page: usually a new URL (handled by the main loop); if it updates in place, go on here
-    if (await find(() => amzPayWithUpi() && amzQrChosen(), 15000)) return amazonCheckout({ ...job, step: "chosen" });
+    if (await find(() => amzPayWithUpi() && amzQrChosen() || amzOnOffers(), 15000))
+      return amazonCheckout({ ...job, step: "chosen" });
+    if (await amzOfferAfter(job)) return;
     return step("checkout", AMZ_STUCK + amzDiag(), true);   // (says nothing if the page moved on)
   }
   if (what === "change") {

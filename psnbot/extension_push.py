@@ -93,6 +93,19 @@ async def publish_control(client, state) -> bool:
         return False
 
 
+async def publish_action(client, state, action: str, **fields) -> bool:
+    """A one-off command for one browser (e.g. reload a payment tab). Its own message type, so it
+    can never be mistaken for the pause / QR-mode control message that browsers re-read on connect."""
+    payload = {"v": 1, "type": "action", "action": action, "ts": time.time(), **fields}
+    try:
+        r = await client.post(f"{server()}/{topic(state)}", content=json.dumps(payload).encode(),
+                              headers={"Tags": "psnact", "Title": "extension action"}, timeout=10)
+        return r.status_code < 300
+    except Exception as e:  # noqa: BLE001
+        log.warning("Extension action push failed: %r", e)
+        return False
+
+
 # ---- connected browsers (each extension posts a small heartbeat to <topic>-hb) ----
 def hb_topic(state) -> str:
     return topic(state) + "-hb"

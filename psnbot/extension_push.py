@@ -102,10 +102,13 @@ def revoked(state) -> list[str]:
     return list(state.settings.get("ext_revoked") or [])
 
 
-async def devices(client, state) -> list[dict]:
-    """Latest heartbeat per browser (ntfy keeps ~12 h), newest first; revoked ones left out."""
+async def devices(client, state, since: str = "6h") -> list[dict]:
+    """Latest heartbeat per browser, newest first; revoked ones left out.
+    `tags=psnhb` lets ntfy do the filtering, so a 50-browser fleet doesn't send back every
+    purchase and control message too."""
     try:
-        r = await client.get(f"{server()}/{hb_topic(state)}/json", params={"poll": "1", "since": "24h"}, timeout=15)
+        r = await client.get(f"{server()}/{hb_topic(state)}/json",
+                             params={"poll": "1", "since": since, "tags": "psnhb"}, timeout=20)
     except Exception as e:  # noqa: BLE001
         log.warning("Extension heartbeat read failed: %r", e)
         return []
@@ -156,7 +159,8 @@ async def refresh_purchases(client, state) -> int:
     if not state.settings.get("ext_topic") and not os.environ.get("NTFY_TOPIC"):
         return 0
     try:
-        r = await client.get(f"{server()}/{hb_topic(state)}/json", params={"poll": "1", "since": "24h"}, timeout=15)
+        r = await client.get(f"{server()}/{hb_topic(state)}/json",
+                             params={"poll": "1", "since": "24h", "tags": "psnbuy"}, timeout=20)
     except Exception as e:  # noqa: BLE001
         log.warning("Purchases read failed: %r", e)
         return 0

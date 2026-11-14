@@ -5,6 +5,10 @@ const ALLOWED_HOSTS = [
   "www.gamestheshop.com", "www.amazon.in", "www.flipkart.com", "blinkit.com",
   "www.gyftr.com", "store.jiogames.com", "shop.rooter.gg", "offers.myhubble.money",
   "digistore.co.in", "www.woohoo.in",
+  // small Shopify / WooCommerce shops (config.yaml): opened only, no auto-click
+  "gameprex.in", "www.simplygaming.in", "hitechgamez.in", "gamekart.in", "e2zstore.com",
+  "www.nistore.in", "sheenugamecenter.com", "hgworld.in", "www.stanshop.co", "krgkart.com",
+  "emartgames.in", "venusgamesandelecs.com",
 ];
 const AUTO_STORES = ["gamestheshop", "amazon", "flipkart"];   // stores where it clicks through to checkout
 

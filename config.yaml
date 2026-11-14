@@ -129,3 +129,34 @@ stores:
     # A card can stay listed after it runs out (Buy Now then says "out of stock"), so each
     # listed card is double-checked like Buy Now does (guest cart, nothing is ordered).
     verify_stock: true
+
+  # ---- Small shops (Shopify / WooCommerce) --------------------------------------------
+  # Any shop on Shopify or WooCommerce works with just name + url + platform. `auto` finds out
+  # which one it is on the first check. Run `python -m psnbot --list` to see what each one finds;
+  # a shop that shows ERROR there is on another platform or blocks the server: set enabled: false.
+  # Optional per shop: search_queries (default [playstation, psn]), interval_seconds,
+  # product_handles (Shopify: extra cards by the last part of their /products/... link).
+  gameprex:
+    {name: GamePrex, url: "https://gameprex.in", platform: auto, interval_seconds: 120}
+  simplygaming:
+    {name: Simply Gaming, url: "https://www.simplygaming.in", platform: auto, interval_seconds: 120}
+  hitechgamez:
+    {name: Hitech Gamez, url: "https://hitechgamez.in", platform: auto, interval_seconds: 120}
+  gamekart:
+    {name: Games Kart, url: "https://gamekart.in", platform: auto, interval_seconds: 120}
+  e2zstore:
+    {name: E2Z Store, url: "https://e2zstore.com", platform: woocommerce, interval_seconds: 120}
+  nistore:
+    {name: NI Store, url: "https://www.nistore.in", platform: auto, interval_seconds: 120}
+  sheenugamecenter:
+    {name: Sheenu Game Center, url: "https://sheenugamecenter.com", platform: auto, interval_seconds: 120}
+  hgworld:
+    {name: HG World, url: "https://hgworld.in", platform: auto, interval_seconds: 120}
+  stanshop:
+    {name: Stan Shop, url: "https://www.stanshop.co", platform: auto, interval_seconds: 120}
+  krgkart:
+    {name: KRG Kart, url: "https://krgkart.com", platform: auto, interval_seconds: 120}
+  emartgames:
+    {name: E Mart, url: "https://emartgames.in", platform: auto, interval_seconds: 120}
+  venusgames:
+    {name: Venus Games, url: "https://venusgamesandelecs.com", platform: auto, interval_seconds: 120}

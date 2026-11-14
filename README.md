@@ -13,6 +13,7 @@ Checks PlayStation Store gift cards (every value) on several Indian stores every
 | JioGames Store | PlayStation collection (cards are hidden when sold out), every 60 s | ✅ Works |
 | Amazon.in | Listings from `config.yaml`, checked via the mobile product page (the ₹4000 card every 60 s) | ✅ Works |
 | Blinkit | Product API with your location (pincode 271001 → lat/lon) | ⚠️ Off by default; test with `--test-blinkit` (blocks cloud IPs) |
+| Small shops: GamePrex, Simply Gaming, Hitech Gamez, Games Kart, E2Z Store, NI Store, Sheenu Game Center, HG World, Stan Shop, KRG Kart, E Mart, Venus Games | Shop's own Shopify or WooCommerce product API (platform found automatically), every 120 s | 🧪 New; check with `--list` |
 | Paytm, CRED | — | ❌ Not included (see below) |
 
 ## How alerts work
@@ -163,4 +164,11 @@ To change something, edit `config.yaml` (check intervals, stores, search terms, 
 - **Paytm, CRED:** app-only and need a logged-in account. Automating them breaks their terms and can get the account banned.
 
 ## Adding a store
-Create `psnbot/stores/<name>.py` with a `Store` subclass whose `fetch()` returns a list of `Item`s. Then register it in `psnbot/stores/__init__.py` and add a section to `config.yaml`.
+**Shopify or WooCommerce shop:** no code needed. Add it under `stores:` in `config.yaml`:
+```yaml
+  myshop:
+    {name: My Shop, url: "https://myshop.in", platform: auto, interval_seconds: 120}
+```
+Then run `.venv/bin/python -m psnbot --list`. It shows `[shopify]` or `[woocommerce]` and the cards it found, or `ERROR` if the shop uses another platform or blocks the server (then set `enabled: false`). To let the browser extension open its links, also add the shop's host to `ALLOWED_HOSTS` in `extension/background.js`.
+
+**Any other store:** create `psnbot/stores/<name>.py` with a `Store` subclass whose `fetch()` returns a list of `Item`s. Then register it in `psnbot/stores/__init__.py` and add a section to `config.yaml`.

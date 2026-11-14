@@ -66,3 +66,17 @@ class Store:
     @staticmethod
     async def polite_pause(lo: float = 0.8, hi: float = 2.0) -> None:
         await asyncio.sleep(random.uniform(lo, hi))
+
+    @classmethod
+    def between(cls, lo: float = 0.8, hi: float = 2.0):
+        """`gap = self.between()`, then `await gap()` at the top of each loop round: pauses between
+        requests, but not before the first or after the last (that would only delay the results)."""
+        first = True
+
+        async def gap() -> None:
+            nonlocal first
+            if first:
+                first = False
+                return
+            await cls.polite_pause(lo, hi)
+        return gap

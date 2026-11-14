@@ -42,7 +42,9 @@ class Hubble(Store):
         headers = {"Accept": "*/*", "Referer": f"{BASE}/shop-by-category/gaming-gift-cards",
                    "x-server-id": quote(f"{_FN}#{_FN_NAME}", safe=""), "x-server-instance": "server-fn:0"}
         seen: dict[str, Item] = {}
+        gap = self.between()
         for cat in self.cfg.get("categories", ["GAMING"]):
+            await gap()
             r = await self.get(client, _url(cat), headers=headers)
             products = parse_products(r.text)
             if not products:
@@ -58,7 +60,6 @@ class Hubble(Store):
                     in_stock=p["status"] == "ACTIVE",
                     note=f"{disc:g}% off" if disc else "",
                 )
-            await self.polite_pause()
         return list(seen.values())
 
     async def fetch_fast(self, client):

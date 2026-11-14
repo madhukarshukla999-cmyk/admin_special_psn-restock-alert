@@ -6,6 +6,7 @@ import time
 import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -92,6 +93,8 @@ class State:
                 data = {}
         self._last = None
         self._saved_at = 0.0
+        self._seq = self._written = 0
+        self._wlock = threading.Lock()
         # True once the first full check has recorded stock (older files: having items counts).
         self.seeded: bool = bool(data.get("seeded", bool(data.get("items"))))
         self.items: dict[str, dict] = data.get("items", {})
@@ -109,33 +112,50 @@ class State:
             indent=1, ensure_ascii=False,
         )
 
-    def save(self) -> None:
+    def _next(self) -> tuple[int, str] | None:
+        """(sequence number, payload) for a write, or None if nothing changed."""
         payload = self.dumps()
         if payload == self._last:
-            return                       # nothing changed; skip the write
-        try:
-            self._store.save(payload)
-            self._last = payload
-            self._saved_at = time.time()
-        except Exception:  # noqa: BLE001 - a failed save must not stop the checks
-            log.exception("Saving state failed (%s); will retry on the next save", self.backend)
+            return None
+        self._seq += 1
+        self._last = payload             # set now, so the same state isn't queued twice
+        return self._seq, payload
+
+    def _write(self, seq: int, payload: str) -> None:
+        """One write at a time; a write that is older than one already done is skipped, so a
+        slow background write can never put back an older state."""
+        with self._wlock:
+            if seq <= self._written:
+                return
+            try:
+                self._store.save(payload)
+                self._written = seq
+            except Exception:  # noqa: BLE001 - a failed save must not stop the checks
+                if self._last == payload:
+                    self._last = None    # retry on the next save
+                log.exception("Saving state failed (%s); will retry on the next save", self.backend)
+
+    def save(self) -> None:
+        """Save now, blocking. Fine for rare events; the hot paths use save_async()."""
+        job = self._next()
+        self._saved_at = time.time()
+        if job:
+            self._write(*job)
+
+    async def save_async(self) -> None:
+        """Save now without stalling the bot: the JSON is built here, the slow write (Postgres or
+        disk) runs in a thread, so other stores and orders in progress keep going meanwhile."""
+        job = self._next()
+        self._saved_at = time.time()
+        if job:
+            await asyncio.to_thread(self._write, *job)
 
     async def save_soon(self, min_gap: float = 3.0) -> None:
-        """Save without stalling the bot. Used on the checking path, which runs every couple of
-        seconds: writing to Postgres blocks, and a stall there delays restock orders and alerts.
-        At most one write per `min_gap` seconds; the heartbeat and shutdown always save in full."""
+        """Like save_async(), but at most one write per `min_gap` seconds. Used after routine checks,
+        which run every couple of seconds."""
         if time.time() - self._saved_at < min_gap:
             return
-        payload = self.dumps()
-        if payload == self._last:
-            self._saved_at = time.time()
-            return
-        self._saved_at = time.time()     # set first, so parallel checks don't all queue a write
-        try:
-            await asyncio.to_thread(self._store.save, payload)
-            self._last = payload
-        except Exception:  # noqa: BLE001
-            log.exception("Saving state failed (%s); will retry on the next save", self.backend)
+        await self.save_async()
 
     @property
     def is_new(self) -> bool:

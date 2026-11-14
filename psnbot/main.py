@@ -381,7 +381,7 @@ class Bot:
             await self._notify(client, restocked, sold_out)
             # a restock must be written straight away; routine checks can wait a moment
             if restocked or sold_out:
-                self.state.save()
+                await self.state.save_async()
             else:
                 await self.state.save_soon()
 
@@ -396,7 +396,7 @@ class Bot:
             if restocked:
                 log.info("%s: restock found mid-check, alerting now", store.name)
                 await self._notify(client, restocked, sold_out)
-                self.state.save()
+                await self.state.save_async()
         except Exception:  # noqa: BLE001 - an alert problem must not abort the check
             log.exception("%s: early alert failed", store.name)
 
@@ -425,13 +425,18 @@ class Bot:
     async def _gts_warm_loop(self, client) -> None:
         """Keep the GamesTheShop connection open, so a restock checkout skips the handshake."""
         from . import gtscheckout
+        gts = next((s for s in self.stores if s.id == "gamestheshop"), None)
         while not self._stop.is_set():
             if gtscheckout.accounts(self.state) and not self.tg.dry_run:
                 try:
                     await gtscheckout.warm_up()
+                    # card details for the cart, so a restock order is one request shorter
+                    for pid in list(getattr(gts, "product_ids", ()) or ()):
+                        await gtscheckout.prefetch(pid)
                 except Exception:  # noqa: BLE001
                     log.debug("GamesTheShop warm-up failed", exc_info=True)
-            await _sleep(60, self._stop)
+            # 25 s: comfortably inside common server idle timeouts (often 60-75 s)
+            await _sleep(25, self._stop)
 
     async def _store_loop(self, client, store) -> None:
         stop, ev = self._stop, self._resched[store.id]
@@ -539,12 +544,14 @@ class Bot:
 
     async def _notify(self, client, restocked, sold_out) -> None:
         if restocked:
-            await self._send_restock(client, restocked)
-            for store_name, items in restocked.items():
+            async def group_post(store_name, items):
                 try:
                     await self.groups.publish(client, store_name, sorted(items, key=_sort_key), _fmt_item, _now())
                 except Exception:  # noqa: BLE001 - groups must never block personal alerts
                     log.exception("Posting to groups failed")
+            # personal alerts and group posts at the same time, instead of groups waiting for everyone
+            await asyncio.gather(self._send_restock(client, restocked),
+                                 *(group_post(n, i) for n, i in restocked.items()))
         if sold_out:
             try:
                 await self.groups.sold_out(client, {it.key for pairs in sold_out.values() for it, _ in pairs})
@@ -614,13 +621,16 @@ class Bot:
                     quieted = True
                     continue
                 groups.setdefault((tuple(i.key for i in mine), self.users.delay(cid)), [mine, []])[1].append(cid)
-            if quieted:
-                self.state.save()
+            now_sends = []
             for (_, delay), (mine, cids) in sorted(groups.items(), key=lambda kv: kv[0][1]):
                 if delay:
                     self._later(delay, self._send_restock_to(client, store_name, sid, mine, cids, delayed=True))
                 else:
-                    await self._send_restock_to(client, store_name, sid, mine, cids)
+                    now_sends.append(self._send_restock_to(client, store_name, sid, mine, cids))
+            if now_sends:       # everyone without a delay at the same time (owner's card choice ≠ others')
+                await asyncio.gather(*now_sends)
+            if quieted:         # after the alerts, not before them
+                await self.state.save_async()
 
     def _later(self, seconds: float, coro) -> None:
         async def run():
@@ -814,7 +824,7 @@ class Bot:
                 if self._wake:
                     self._wake.set()
             self.state.settings["last_alive"] = now
-            self.state.save()
+            await self.state.save_async()      # every 30 s: must not freeze checks or orders
             if self.warp and await asyncio.to_thread(self.warp.ensure):
                 self._use_tunnel()
             await _sleep(30, self._stop)

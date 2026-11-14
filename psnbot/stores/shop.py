@@ -70,7 +70,9 @@ class Shop(Store):
     # -- WooCommerce ---------------------------------------------------------
     async def _woo(self, client) -> list[Item]:
         seen: dict[int, Item] = {}
+        gap = self.between()
         for q in self.queries:
+            await gap()
             r = await self.get(client, self.base + "/wp-json/wc/store/v1/products",
                                params={"search": q, "per_page": 100}, headers=_JSON)
             try:
@@ -91,7 +93,6 @@ class Shop(Store):
                     url=p.get("permalink") or self.base + "/",
                     in_stock=bool(p.get("is_in_stock")) and bool(p.get("is_purchasable")) and price > 0,
                     price=price or None, mrp=mrp or None)
-            await self.polite_pause()
         return list(seen.values())
 
     # -- Shopify -------------------------------------------------------------
@@ -111,7 +112,9 @@ class Shop(Store):
             self.known.setdefault(h, h)
 
         items: list[Item] = []
+        gap = self.between(0.3, 0.8)
         for handle in list(self.known):
+            await gap()
             r = await client.get(f"{self.base}/products/{handle}.js", headers=_JSON)
             if r.status_code == 404:                         # listing deleted
                 self.known.pop(handle, None)
@@ -131,5 +134,4 @@ class Shop(Store):
                     url=f"{self.base}/products/{handle}" + (f"?variant={v['id']}" if len(variants) > 1 else ""),
                     in_stock=bool(v.get("available")) and price > 0,
                     price=price or None, mrp=mrp or None))
-            await self.polite_pause(0.3, 0.8)
         return items

@@ -31,8 +31,10 @@ class Flipkart(Store):
         pages = int(self.cfg.get("max_pages", 1))
         found: dict[str, Item] = {}
         failures = 0
+        gap = self.between()
         for q in queries:
             for page in range(1, pages + 1):
+                await gap()
                 try:
                     r = await self.get(client, "https://www.flipkart.com/search",
                                        params={"q": q, "page": page})
@@ -45,7 +47,6 @@ class Flipkart(Store):
                     # If two searches disagree, trust "unavailable" (avoids false alerts).
                     if prev is None or (prev.in_stock and not it.in_stock):
                         found[it.item_id] = it
-                await self.polite_pause()
                 if not tiles:
                     break
         if not found:

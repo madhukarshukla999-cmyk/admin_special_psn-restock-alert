@@ -107,7 +107,11 @@ def drop_warm() -> None:
 
 
 async def warm_up() -> bool:
-    """Cheap unauthenticated call that keeps the connection hot. True if it answered."""
+    """Cheap unauthenticated call that keeps the connection hot. True if it answered.
+    Renews the session a little before WARM_MAX_AGE, so it's the warm-up that pays for the new
+    connection, never a restock order."""
+    if _WARM is not None and time.time() - _WARM_AT > WARM_MAX_AGE - 120:
+        drop_warm()
     try:
         r = await _request("GET", "/products/categories", session=warm_session())
         return r.status_code < 500
@@ -201,7 +205,12 @@ _VCACHE_TTL = 3600
 
 
 async def prefetch(product_id: str) -> None:
-    """Warm the details cache for a card (call when it's first seen, so buying skips this request)."""
+    """Warm the details cache for a card, so buying it skips this request. Renewed 5 minutes
+    before it expires, so the cache is never empty when a restock comes."""
+    hit = _VCACHE.get(product_id)
+    if hit and time.time() - hit[0] < _VCACHE_TTL - 300:
+        return
+    _VCACHE.pop(product_id, None)
     try:
         await _product(product_id)
     except GtsError:
@@ -573,14 +582,28 @@ async def order_cards(client, state, acc: dict, items: list, on_result) -> None:
     failed = [f for f in await asyncio.gather(*(attempt(i) for i in items)) if f]
     if not failed:
         return
+    refreshed = False
     if any("login expired" in str(e) for _, e, _ in failed):
-        for it, e, secs in failed:
-            await on_result(it, None, e, secs)
-        return
+        # the login watchdog only runs every 30 min: renew the key now and retry, instead of
+        # missing this restock
+        refreshed = await _try_refresh(acc)
+        if not refreshed:
+            for it, e, secs in failed:
+                await on_result(it, None, e, secs)
+            return
+        log.info("GamesTheShop: login renewed during a restock, retrying %d order(s)", len(failed))
+        retry = [f for f in await asyncio.gather(*(attempt(it) for it, _, _ in failed)) if f]
+        if not retry:
+            return
+        failed = retry
+        if any("login expired" in str(e) for _, e, _ in failed):
+            for it, e, secs in failed:
+                await on_result(it, None, e, secs)
+            return
     if len(items) > 1:
         log.info("GamesTheShop: %d of %d parallel orders failed, retrying them one by one", len(failed), len(items))
     for it, first_err, _ in failed:                  # retry one by one (and only if it ran in parallel)
-        if len(items) == 1:
+        if len(items) == 1 or (refreshed and len(failed) == 1):
             await on_result(it, None, first_err, 0.0)
             continue
         t0 = time.time()
@@ -680,7 +703,7 @@ async def auto_checkout(bot, client, items) -> None:
             await order_cards(client, state, acc, todo, done)   # all this account's cards at once
 
     await asyncio.gather(*(one_account(l, a) for l, a in accts.items()))
-    state.save()
+    await state.save_async()
 
 
 # -- login watchdog: find expired logins before a restock does -------------------------------

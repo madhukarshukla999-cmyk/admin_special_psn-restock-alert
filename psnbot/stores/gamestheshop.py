@@ -122,6 +122,9 @@ class GamesTheShop(Store):
                     break
                 await self.polite_pause()
         items = list(seen.values())
+        # every tracked card, sold out ones too (they're the ones that will restock): the bot
+        # preloads their details so a restock order skips that request
+        self.product_ids = {i.extra["product_id"] for i in items if i.extra.get("product_id") and self.wanted(i)}
         await self._start_buying(client, items)      # before the slower double-check below
         await self._verify(client, items)
         return items

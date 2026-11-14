@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from ..models import Item, StoreError
+from ..models import Item, StoreError, parse_denomination
 from .base import Store
 
 PLATFORMS = ("auto", "shopify", "woocommerce")
@@ -41,6 +41,12 @@ class Shop(Store):
             raise SystemExit(f"stores.{sid}: platform must be one of {', '.join(PLATFORMS)}")
         self.queries = self.cfg.get("search_queries") or ["playstation", "psn"]
         self.known: dict[str, str] = {}     # Shopify product handle -> title
+
+    def _value_ok(self, title: str) -> bool:
+        """Is the value in this product title tracked (only_values)? No value in the title = keep
+        (one product can hold every value as options)."""
+        d = parse_denomination(title)
+        return not self.only_values or d is None or d in self.only_values
 
     def _is_card(self, title: str) -> bool:
         # "PSN Card ₹1000" has no "gift card"/"wallet" word, so also accept card/code with a PSN word.
@@ -142,8 +148,13 @@ class Shop(Store):
             except Exception as e:
                 raise StoreError(f"{self.name}: unexpected search response: {e!r}")
             for p in found:
-                if p.get("handle") and self._is_card(p.get("title") or ""):
-                    self.known.setdefault(p["handle"], p.get("title") or "")
+                title = p.get("title") or ""
+                if p.get("handle") and self._is_card(title) and self._value_ok(title):
+                    self.known.setdefault(p["handle"], title)
+        # a card saved earlier whose value is no longer tracked: stop requesting it
+        for h, t in list(self.known.items()):
+            if not self._value_ok(t):
+                self.known.pop(h)
         for h in self.cfg.get("product_handles") or []:     # extra cards the search doesn't find
             self.known.setdefault(h, h)
 

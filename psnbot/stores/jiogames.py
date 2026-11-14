@@ -149,8 +149,10 @@ class JioGames(Store):
         return seen
 
     async def _verified(self, client, seen: dict) -> list[Item]:
-        await asyncio.gather(*(self._verify(client, it, p) for it, p in seen.values()))
-        return [it for it, _ in seen.values()]
+        # only card values that are tracked (config only_values): no price/cart requests for the rest
+        keep = [(it, p) for it, p in seen.values() if self.wanted(it)]
+        await asyncio.gather(*(self._verify(client, it, p) for it, p in keep))
+        return [it for it, _ in keep]
 
     async def fetch(self, client):
         seen = await self._collections(client)

@@ -426,8 +426,11 @@ class Bot:
         """Keep the GamesTheShop connection open, so a restock checkout skips the handshake."""
         from . import gtscheckout
         gts = next((s for s in self.stores if s.id == "gamestheshop"), None)
+        from . import gtsshot
         while not self._stop.is_set():
             if gtscheckout.accounts(self.state) and not self.tg.dry_run:
+                # screenshot browser open ahead of time (and restarted if it crashed)
+                await gtsshot.warm()
                 try:
                     await gtscheckout.warm_up()
                     # card details for the cart, so a restock order is one request shorter
@@ -939,6 +942,8 @@ class Bot:
             await asyncio.gather(*running, return_exceptions=True)
             self.state.settings["last_alive"] = time.time()
             self.state.save()
+        from . import gtsshot
+        await gtsshot.close()
         await self.stop_tunnel()
         log.info("Stopped.")
 

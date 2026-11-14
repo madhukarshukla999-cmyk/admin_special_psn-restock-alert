@@ -142,8 +142,8 @@ stores:
     {name: Simply Gaming, url: "https://www.simplygaming.in", platform: auto, interval_seconds: 120}
   hitechgamez:
     {name: Hitech Gamez, url: "https://hitechgamez.in", platform: auto, interval_seconds: 120}
-  gamekart:
-    {name: Games Kart, url: "https://gamekart.in", platform: auto, interval_seconds: 120}
+  gamekart:   # off: WordPress without a shop API
+    {enabled: false, name: Games Kart, url: "https://gamekart.in", platform: auto, interval_seconds: 120}
   e2zstore:
     {name: E2Z Store, url: "https://e2zstore.com", platform: woocommerce, interval_seconds: 120}
   nistore:
@@ -152,11 +152,11 @@ stores:
     {name: Sheenu Game Center, url: "https://sheenugamecenter.com", platform: auto, interval_seconds: 120}
   hgworld:
     {name: HG World, url: "https://hgworld.in", platform: auto, interval_seconds: 120}
-  stanshop:
-    {name: Stan Shop, url: "https://www.stanshop.co", platform: auto, interval_seconds: 120}
+  stanshop:   # off: custom Next.js site, needs its own checker
+    {enabled: false, name: Stan Shop, url: "https://www.stanshop.co", platform: auto, interval_seconds: 120}
   krgkart:
     {name: KRG Kart, url: "https://krgkart.com", platform: auto, interval_seconds: 120}
-  emartgames:
-    {name: E Mart, url: "https://emartgames.in", platform: auto, interval_seconds: 120}
-  venusgames:
-    {name: Venus Games, url: "https://venusgamesandelecs.com", platform: auto, interval_seconds: 120}
+  emartgames:   # off: connection fails from the server
+    {enabled: false, name: E Mart, url: "https://emartgames.in", platform: auto, interval_seconds: 120}
+  venusgames:   # off: connection fails from the server
+    {enabled: false, name: Venus Games, url: "https://venusgamesandelecs.com", platform: auto, interval_seconds: 120}

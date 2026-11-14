@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 import logging
 import os
 import tempfile
@@ -89,6 +91,7 @@ class State:
             except (ValueError, OSError):
                 data = {}
         self._last = None
+        self._saved_at = 0.0
         # True once the first full check has recorded stock (older files: having items counts).
         self.seeded: bool = bool(data.get("seeded", bool(data.get("items"))))
         self.items: dict[str, dict] = data.get("items", {})
@@ -113,7 +116,25 @@ class State:
         try:
             self._store.save(payload)
             self._last = payload
+            self._saved_at = time.time()
         except Exception:  # noqa: BLE001 - a failed save must not stop the checks
+            log.exception("Saving state failed (%s); will retry on the next save", self.backend)
+
+    async def save_soon(self, min_gap: float = 3.0) -> None:
+        """Save without stalling the bot. Used on the checking path, which runs every couple of
+        seconds: writing to Postgres blocks, and a stall there delays restock orders and alerts.
+        At most one write per `min_gap` seconds; the heartbeat and shutdown always save in full."""
+        if time.time() - self._saved_at < min_gap:
+            return
+        payload = self.dumps()
+        if payload == self._last:
+            self._saved_at = time.time()
+            return
+        self._saved_at = time.time()     # set first, so parallel checks don't all queue a write
+        try:
+            await asyncio.to_thread(self._store.save, payload)
+            self._last = payload
+        except Exception:  # noqa: BLE001
             log.exception("Saving state failed (%s); will retry on the next save", self.backend)
 
     @property

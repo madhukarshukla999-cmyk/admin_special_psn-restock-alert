@@ -72,16 +72,60 @@ def _session():
     return AsyncSession(impersonate="chrome", **kw)
 
 
+# One long-lived session, kept warm by warm_up() below. Opening a connection to India costs
+# several round trips (~0.5-0.75 s from a US server) and cards can sell out in seconds, so the
+# handshake must already be done before a restock, not during the checkout.
+_WARM = None
+_WARM_AT = 0.0
+WARM_MAX_AGE = 15 * 60
+
+
+def warm_session():
+    global _WARM, _WARM_AT
+    if _WARM is None or time.time() - _WARM_AT > WARM_MAX_AGE:
+        drop_warm()
+        _WARM = _session()
+        _WARM_AT = time.time()
+    return _WARM
+
+
+def drop_warm() -> None:
+    """Throw the session away (after an error, or when it's too old) so the next call reconnects."""
+    global _WARM
+    s, _WARM = _WARM, None
+    if s is None:
+        return
+    try:
+        closer = getattr(s, "close", None)
+        if closer:
+            res = closer()
+            if asyncio.iscoroutine(res):
+                task = asyncio.create_task(res)
+                task.add_done_callback(lambda t: t.exception())
+    except Exception:  # noqa: BLE001 - closing a dead session must never raise
+        pass
+
+
+async def warm_up() -> bool:
+    """Cheap unauthenticated call that keeps the connection hot. True if it answered."""
+    try:
+        r = await _request("GET", "/products/categories", session=warm_session())
+        return r.status_code < 500
+    except GtsError:
+        drop_warm()
+        return False
+
+
 async def _request(method, path, *, json=None, params=None, headers=None, session=None):
     h = {"Accept": "application/json, text/plain, */*", **SITE, **(headers or {})}
+    s = session or warm_session()                     # already-connected session: no handshake
     try:
-        if session is not None:                       # reuse the open connection
-            return await session.request(method, f"{API}{path}", json=json, params=params, headers=h, timeout=12)
-        async with _session() as s:                   # one-off call
-            return await s.request(method, f"{API}{path}", json=json, params=params, headers=h, timeout=12)
+        return await s.request(method, f"{API}{path}", json=json, params=params, headers=h, timeout=12)
     except GtsError:
         raise
     except Exception as e:  # noqa: BLE001 - network/curl errors surface as a clean message
+        if s is _WARM:
+            drop_warm()                               # maybe a dead connection: reconnect next time
         raise GtsError(f"request failed: {e!r}")
 
 
@@ -234,44 +278,44 @@ async def checkout(client, state, acc: dict, item) -> dict:
     if not product_id:
         raise GtsError("missing product id for this card")
 
-    async with _session() as s:                       # one open connection for all the calls below
-        if not acc.get("user_id"):                    # login-time profile fetch may have been skipped
-            pr = await _get(None, "/customer/profile", headers=H, session=s)
-            if pr.status_code in (401, 403):
-                raise GtsError("login expired – add this account again with /gtsbuy add")
-            prof = _json(pr).get("data") or {}
-            acc["user_id"] = str(prof.get("user_id") or prof.get("id") or "")
-            if isinstance(prof.get("addresses"), list):
-                acc["addresses"] = prof["addresses"]
-            if not acc.get("user_id"):
-                raise GtsError("couldn't read the account id – add the account again with /gtsbuy add")
-            state.save()
-
-        # card details (cached), so the cart matches what the website sends (prices, category, etc.)
-        v, _d = await _variant(client, product_id, item.item_id, session=s)
-
-        # 1) buy-now cart
-        cart_body = _cart_body(v, product_id, item.item_id, item)
-        r = await _post(client, "/cart/", params={"userId": acc["user_id"], "buyNow": "true"}, json=cart_body, headers=H, session=s)
-        if r.status_code in (401, 403):
+    s = warm_session()                                # already connected: saves the TLS handshake
+    if not acc.get("user_id"):                    # login-time profile fetch may have been skipped
+        pr = await _get(None, "/customer/profile", headers=H, session=s)
+        if pr.status_code in (401, 403):
             raise GtsError("login expired – add this account again with /gtsbuy add")
-        if r.status_code not in (200, 201):
-            raise GtsError(f"add to cart failed (HTTP {r.status_code}: {_detail(r)})")
+        prof = _json(pr).get("data") or {}
+        acc["user_id"] = str(prof.get("user_id") or prof.get("id") or "")
+        if isinstance(prof.get("addresses"), list):
+            acc["addresses"] = prof["addresses"]
+        if not acc.get("user_id"):
+            raise GtsError("couldn't read the account id – add the account again with /gtsbuy add")
+        state.save()
 
-        # 2) create order
-        order_body = {"payment_type": "PREPAID", "items": [{"variant_id": item.item_id, "qty": 1}]}
-        addr = (acc.get("addresses") or [None])[0] if isinstance(acc.get("addresses"), list) else acc.get("addresses")
-        if addr:
-            order_body["shipping_address"] = order_body["billing_address"] = addr
-        r = await _post(client, "/orders/create", json=order_body, headers=H, session=s)
-        data = _json(r).get("data") or {}
-        order_id = data.get("order_id") or data.get("checkout_group_id")
-        if r.status_code not in (200, 201) or not order_id:
-            raise GtsError(_json(r).get("message") or f"couldn't create the order (HTTP {r.status_code})")
+    # card details (cached), so the cart matches what the website sends (prices, category, etc.)
+    v, _d = await _variant(client, product_id, item.item_id, session=s)
 
-        # 3) checkout -> Paytm token
-        r = await _post(client, "/orders/checkout", json={"checkout_group_id": order_id}, headers=H, session=s)
-        pay = _json(r).get("data") or {}
+    # 1) buy-now cart
+    cart_body = _cart_body(v, product_id, item.item_id, item)
+    r = await _post(client, "/cart/", params={"userId": acc["user_id"], "buyNow": "true"}, json=cart_body, headers=H, session=s)
+    if r.status_code in (401, 403):
+        raise GtsError("login expired – add this account again with /gtsbuy add")
+    if r.status_code not in (200, 201):
+        raise GtsError(f"add to cart failed (HTTP {r.status_code}: {_detail(r)})")
+
+    # 2) create order
+    order_body = {"payment_type": "PREPAID", "items": [{"variant_id": item.item_id, "qty": 1}]}
+    addr = (acc.get("addresses") or [None])[0] if isinstance(acc.get("addresses"), list) else acc.get("addresses")
+    if addr:
+        order_body["shipping_address"] = order_body["billing_address"] = addr
+    r = await _post(client, "/orders/create", json=order_body, headers=H, session=s)
+    data = _json(r).get("data") or {}
+    order_id = data.get("order_id") or data.get("checkout_group_id")
+    if r.status_code not in (200, 201) or not order_id:
+        raise GtsError(_json(r).get("message") or f"couldn't create the order (HTTP {r.status_code})")
+
+    # 3) checkout -> Paytm token
+    r = await _post(client, "/orders/checkout", json={"checkout_group_id": order_id}, headers=H, session=s)
+    pay = _json(r).get("data") or {}
     if r.status_code not in (200, 201) or not pay.get("txnToken"):
         raise GtsError(_json(r).get("message") or f"couldn't start the payment (HTTP {r.status_code})")
     return {"order_id": order_id, "paytmOrderId": pay.get("paytmOrderId"), "txnToken": pay.get("txnToken"),

@@ -306,14 +306,43 @@ async function waitFor(test, ms) {
 // The decline button of a Prime / offers page shown during checkout ("No Thanks"), or null
 function amzSkipOffer() {
   if (!/\/(checkout|gp\/buy)\//.test(location.pathname)) return null;
-  const no = textEl(/^(no,? thanks?|no thank you|not now|skip( this)?|maybe later|continue without (prime|offers?|subscribing))$/i,
-                    "a, button, input[type=submit], span, label");
+  const no = textEl(DECLINE_RE, "a, button, input[type=submit], span, label");
   if (!no || !(/\/offers/.test(location.pathname) || /prime/i.test(document.body.innerText))) return null;
   const el = clickable(no);
   return enabled(el) ? el : null;
 }
 
 const amzOnOffers = () => /\/(checkout|gp\/buy)\/.*\/offers\b/.test(location.pathname);
+
+const DECLINE_RE = /^(no,? thanks?|no thank you|not now|skip( this)?|maybe later|continue without (prime|offers?|subscribing))$/i;
+const btnText = (e) => ((e.innerText || e.value || e.getAttribute("aria-label") || "") + "").trim().slice(0, 30) || e.tagName;
+const inDialog = (e) => !!e.closest('[role=dialog], .a-popover-wrapper, .a-modal-scroller, .a-popover');
+
+// Would a real click at the middle of `el` land on it (not on something covering it)?
+function onTop(el) {
+  try { el.scrollIntoView({ block: "center" }); } catch { /* ignore */ }
+  const r = el.getBoundingClientRect();
+  if (r.width < 2 || r.height < 2) return false;
+  const t = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  const box = el.closest(".a-button") || el;
+  return !!t && (t === el || el.contains(t) || box.contains(t));
+}
+
+// Every clickable decline button on a Prime/offers page, best first: on top of the page, in the
+// pop-up, then the one added last (a confirmation box comes after the page). Then, only if
+// there's no decline at all, the page's plain "Next step" / "Continue" (never Prime / trial / join).
+function amzButtons(re) {
+  const label = (e) => ((e.innerText || e.value || e.getAttribute("aria-label") || "") + "").trim();
+  const hits = [...document.querySelectorAll("a, button, input[type=submit], span, label")]
+    .filter((e) => visible(e) && re.test(label(e)));
+  const inner = hits.filter((e) => !hits.some((o) => o !== e && e.contains(o)));
+  const els = [...new Set(inner.map(clickable))].filter(enabled);
+  const order = (e, i) => (onTop(e) ? 0 : 4) + (inDialog(e) ? 0 : 2) - i / 1000;
+  return els.map((e, i) => [e, order(e, i)]).sort((a, b) => a[1] - b[1]).map(([e]) => e);
+}
+const amzDeclines = () => amzButtons(DECLINE_RE);
+// the page's plain "Next step" / "Continue" (never Prime / trial / join)
+const amzNextStep = () => amzButtons(/^(next step|continue)$/i)[0] || null;
 
 // After a step that didn't work: did Amazon put a Prime/offers page in between? Then decline it
 // and carry on, instead of giving up.
@@ -355,20 +384,38 @@ async function amazonCheckout(job) {
   }, 25000);
 
   if (what === "offer") {
-    // Prime / offers page in the middle of checkout: always decline (never "Continue with Prime")
+    // Prime / offers page in the middle of checkout: always decline (never "Continue with Prime").
+    // Amazon draws the offer twice (page + pop-up, or a hidden copy), so try each "No Thanks"
+    // you could really click – the one on top first – until the page moves on.
     const mine = await chrome.runtime.sendMessage({ type: "claim", what: "amzoffer" + location.pathname }).catch(() => true);
     if (!mine) return;
-    await step("offer", "Amazon: Prime/offer page – clicking 'No Thanks'…");
-    realClick(amzSkipOffer());
-    if (await waitFor(() => moved() || !amzSkipOffer(), 5000)) return moved() ? undefined : amazonCheckout({ ...job, step: "offer" });
-    // still there: its plain "Next step" button (nothing that joins / starts / tries anything)
-    const next = textEl(/^(next step|continue)$/i, "a, button, input[type=submit], span");
-    if (next) {
-      await step("offer", "Amazon: offer page – clicking 'Next step'…");
-      realClick(clickable(next));
-      if (await waitFor(() => moved() || !amzSkipOffer(), 5000)) return moved() ? undefined : amazonCheckout({ ...job, step: "offer" });
+    const gone = () => moved() || !amzOnOffers() && !amzSkipOffer();
+    const tried = new Set();
+    for (let i = 0; i < 6 && !gone(); i++) {
+      const el = amzDeclines().find((e) => !tried.has(e));
+      if (!el) break;
+      tried.add(el);
+      await step("offer", `Amazon: Prime/offer page – clicking '${btnText(el)}' (${i + 1})…`);
+      realClick(el);
+      if (await waitFor(gone, 1500)) break;
+      if (el.form && el.matches("input[type=submit], button")) {     // a form button that ignored the click
+        try { el.form.requestSubmit(el); } catch { /* ignore */ }
+        if (await waitFor(gone, 1500)) break;
+      }
+      // "No Thanks" may only select that choice: confirm it with the page's "Next step"
+      const next = amzNextStep();
+      if (next) {
+        await step("offer", "Amazon: offer page – clicking 'Next step'…");
+        realClick(next);
+        if (await waitFor(gone, 3000)) break;
+      }
     }
-    return step("checkout", "Amazon: stuck on the Prime/offer page – press 'No Thanks' yourself, then pay. " + amzDiag(), true);
+    if (gone()) return moved() ? undefined : amazonCheckout({ ...job, step: "offer" });
+    // what each decline button was, so the next version can click the right one
+    const seen = [...tried].map((e) => `${e.tagName.toLowerCase()}${e.id ? "#" + e.id : ""}` +
+      `${e.name ? "[name=" + e.name + "]" : ""}${onTop(e) ? ":top" : ":covered"}${inDialog(e) ? ":popup" : ""}`);
+    return step("checkout", "Amazon: stuck on the Prime/offer page – press 'No Thanks' yourself, then pay. " +
+                `[tried ${JSON.stringify(seen)}] ` + amzDiag(), true);
   }
 
   if (what === "pay") {

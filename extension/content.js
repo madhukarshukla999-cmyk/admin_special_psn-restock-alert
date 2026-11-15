@@ -762,12 +762,31 @@ async function amazon(job) {
 const FK_SOLD = /^(sold out|coming soon|currently unavailable|out of stock|notify me|temporarily unavailable)$/i;
 const FK_CANT_BUY = /not available (to|for) purchase|cannot be (bought|purchased)|can't be (bought|purchased)|item is unavailable/i;
 // a visible, enabled button whose own text matches
-const fkBtn = (re) => () => {
-  const e = textEl(re, "button, a, [role=button], input[type=submit], label, span, div");
-  if (!e) return null;
-  const b = e.closest("button, a, [role=button], input[type=submit], label") || e;
-  return enabled(b) ? b : null;
-};
+// Flipkart's new site (React Native Web) keeps hidden, zero-size copies of its buttons, and the
+// text sits in a <div> inside the box that really takes the click. So: every element with the
+// text → its clickable box (button / link / role=button / tabindex / hand cursor, a few levels
+// up) → only boxes with a real size on screen → the one actually on top first.
+function fkClickBox(e) {
+  const tag = e.closest("button, a, [role=button], input[type=submit], label");
+  if (tag) return tag;
+  for (let x = e, i = 0; x && x !== document.body && i < 6; x = x.parentElement, i++) {
+    if (x.tabIndex >= 0 && x.hasAttribute("tabindex")) return x;
+    if (getComputedStyle(x).cursor === "pointer" && (!x.parentElement || getComputedStyle(x.parentElement).cursor !== "pointer")) return x;
+  }
+  return e;
+}
+const realSize = (e) => { const r = e.getBoundingClientRect(); return r.width >= 20 && r.height >= 12; };
+function fkButtons(re) {
+  const label = (e) => ((e.innerText || e.value || e.getAttribute("aria-label") || "") + "").trim();
+  const hits = [...document.querySelectorAll("button, a, [role=button], input[type=submit], label, span, div")]
+    .filter((e) => visible(e) && re.test(label(e)));
+  const inner = hits.filter((e) => !hits.some((o) => o !== e && e.contains(o)));
+  const boxes = [...new Set(inner.map(fkClickBox))].filter((b) => enabled(b) && realSize(b));
+  const top = (b) => { const r = b.getBoundingClientRect();
+    const t = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!t && (b === t || b.contains(t)); };
+  return boxes.map((b, i) => [b, (top(b) ? 0 : 2) - i / 1000]).sort((a, b) => a[1] - b[1]).map(([b]) => b);
+}
+const fkBtn = (re) => () => fkButtons(re)[0] || null;
 function fkDiag() {
   // Flipkart's buttons are mostly styled <div>s: also list short texts with a hand cursor
   const els = [...document.querySelectorAll("button, [role=button], input[type=submit], div, span, a")].filter((e) => {
@@ -850,8 +869,16 @@ async function flipkartProduct(job) {
   const reacted = () => (leaving || moved() ? "moved" : FK_CANT_BUY.test(document.body.innerText) ? "cant"
     : (() => { const sb = fkSheetBtn(); return sb && sb !== sheetBefore ? "sheet" : null; })());
   // script click, then a real (Chrome-level) click if Flipkart ignored it
-  await clickHard(btn, reacted, 3000);
-  let res = reacted() || await find(reacted, 5000);
+  // each real copy of the button in turn (script click, then a Chrome-level click)
+  const reBtn = isBuy ? /^\W*buy( now| at\s*₹?\s*[\d,]+(\.\d+)?)\W*$/i : /^\W*(add to cart|add to basket)\W*$/i;
+  const copies = [btn, ...fkButtons(reBtn).filter((c) => c !== btn)].slice(0, 3);
+  let res = null;
+  for (const c of copies) {
+    if (await clickHard(c, reacted, 3000)) { res = reacted(); break; }
+    res = reacted();
+    if (res) break;
+  }
+  res = res || await find(reacted, 3000);
   if (res === "cant") return step("none", "Flipkart: Flipkart says this card can't be bought right now (listed, but not purchasable).", true);
   if (res === "sheet") {                              // a pop-up after Buy Now (quantity / confirm / email)
     const b2 = fkSheetBtn();

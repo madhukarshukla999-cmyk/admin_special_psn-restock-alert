@@ -816,6 +816,19 @@ async function flipkart(job) {
   if (job.step !== "start" || /\/(checkout|payments?)\b/.test(path)) return flipkartCheckout(job);
 }
 
+// a Continue / Buy now / Proceed button inside a pop-up that Buy Now opened (null if none)
+function fkSheetBtn() {
+  const box = [...document.querySelectorAll('[role=dialog], [aria-modal=true], [class*=modal i], [class*=sheet i], [class*=popup i]')]
+    .find((d) => visible(d) && (d.innerText || "").trim().length > 0);
+  if (!box) return null;
+  const re = /^\W*(continue|proceed|buy now|confirm|ok|done|place order)\W*$/i;
+  const el = [...box.querySelectorAll("button, a, [role=button], div, span")]
+    .filter((e) => visible(e) && re.test((e.innerText || "").trim()) && !e.children.length)[0];
+  if (!el) return null;
+  const b = el.closest("button, a, [role=button]") || el;
+  return enabled(b) ? b : null;
+}
+
 async function flipkartProduct(job) {
   // "Buy now", "BUY NOW", "Buy at ₹1,000" (newer pages); icons / arrows around the text are fine
   const buy = fkBtn(/^\W*buy( now| at\s*₹?\s*[\d,]+(\.\d+)?)\W*$/i), add = fkBtn(/^\W*(add to cart|add to basket)\W*$/i);
@@ -832,10 +845,21 @@ async function flipkartProduct(job) {
   }
   const isBuy = btn === buy();
   await step(isBuy ? "buynow" : "added", `Flipkart: product page – clicking '${isBuy ? "Buy Now" : "Add to cart"}'…`);
-  realClick(btn);
   // Flipkart can show "Buy now" for cards that can't actually be bought
-  const res = await find(() => (leaving || moved() ? "moved" : FK_CANT_BUY.test(document.body.innerText) ? "cant" : null), 8000);
+  const reacted = () => (leaving || moved() ? "moved" : FK_CANT_BUY.test(document.body.innerText) ? "cant"
+    : fkSheetBtn() ? "sheet" : null);
+  // script click, then a real (Chrome-level) click if Flipkart ignored it
+  await clickHard(btn, reacted, 3000);
+  let res = reacted() || await find(reacted, 5000);
   if (res === "cant") return step("none", "Flipkart: Flipkart says this card can't be bought right now (listed, but not purchasable).", true);
+  if (res === "sheet") {                              // a pop-up after Buy Now (quantity / confirm / email)
+    const b2 = fkSheetBtn();
+    await step(isBuy ? "buynow" : "added", `Flipkart: pop-up – clicking '${btnText(b2)}'…`);
+    await clickHard(b2, () => (leaving || moved() ? "moved" : null), 3000);
+    res = moved() || leaving ? "moved" : null;
+  }
+  if (isBuy && res !== "moved")
+    return step("none", "Flipkart: pressed 'Buy Now' but the page didn't change – press it yourself. " + fkDiag(), true);
   if (!isBuy && res !== "moved") {
     const go = await find(fkBtn(/^(go to cart|place order)$/i), 5000);
     if (go) { await step("added", "Flipkart: added – going to the cart…"); realClick(go); }

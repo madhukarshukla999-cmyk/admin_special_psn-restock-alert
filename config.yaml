@@ -76,18 +76,22 @@ stores:
     max_pages: 1
 
   amazon:
-    interval_seconds: 30         # every Amazon listing; Amazon may block very frequent checks (raise if you get ⚠️ warnings)
-    fast_interval_seconds: 30    # the fast_check card(s)
+    interval_seconds: 60         # full check (also re-reads the links below)
+    fast_interval_seconds: 10    # every card below, all at once (was 1 card every 30 s)
+    max_parallel: 4              # page loads at the same time
+    # On a captcha the bot pauses Amazon (1 min, doubling up to 15 min) and eases back after a
+    # clean run, so the server's IP doesn't get blocked for good. Raise fast_interval_seconds if
+    # you keep getting "paused after a captcha".
     # Amazon search is blocked from cloud servers, so the bot checks the listings below
     # (via Amazon's mobile product page, which isn't blocked). Paste any Amazon link:
     # full URL, amzn.in share link, or just the 10-character product ID.
     enabled: true
-    product_urls:
+    product_urls: []
+    # Restocks here sell out within minutes: all of them on the fast check.
+    fast_check:
       - https://www.amazon.in/dp/B093QF35KZ   # Rs.2000 Sony PlayStation Store Gift Card
       - https://amzn.in/d/0gZDa4MB            # B0C1H3K2V4  PlayStation E-Gift Card (Instant Delivery)
       - https://www.amazon.in/dp/B07K6PVR8B   # Sony PlayStation Store Gift Card
-    # Also checked every `fast_interval_seconds` (restocks here sell out quickly)
-    fast_check:
       - https://amzn.in/d/0aGMkk6l            # B07K6RYVJ5  Rs.4000 Sony PlayStation Store Gift Card
     search_queries: []                        # search is blocked from cloud IPs; leave empty
 

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import random
 import re
+import time
 from urllib.parse import urlparse
 
 from selectolax.lexbor import LexborHTMLParser
 
 from ..models import Item, StoreError
 from .base import Store
+
+log = logging.getLogger(__name__)
 
 # Amazon blocks its desktop product page (/dp/...) and search (/s) for cloud server IPs,
 # but the mobile product page (/gp/aw/d/...) still loads and shows the same stock info.
@@ -50,6 +56,9 @@ class Amazon(Store):
         self.known: dict[str, str] = {}   # ASIN -> url shown in alerts
         self._resolved: dict[str, str | None] = {}   # config entry -> ASIN
         self._cycle = 0
+        self._cool_until = 0.0       # captcha brake (see _on_blocked)
+        self._cool_for = 0
+        self._clean = 0
 
     # -- config entries -> ASINs -----------------------------------------
     async def _to_asin(self, client, entry: str) -> str | None:
@@ -100,7 +109,28 @@ class Amazon(Store):
             await self.polite_pause(1.5, 3.0)
 
     # -- checks ----------------------------------------------------------
+    # -- captcha brake: Amazon shows a captcha when checked too often from one IP. Then pause,
+    # and come back slower; after a clean run, go back to normal. Keeps fast checking possible
+    # without getting the server's IP blocked for good.
+    def _cooling(self) -> bool:
+        return time.time() < self._cool_until
+
+    def _on_blocked(self) -> None:
+        self._cool_for = min(15 * 60, max(60, self._cool_for * 2))
+        self._cool_until = time.time() + self._cool_for
+        self._clean = 0
+        log.warning("Amazon: captcha – pausing Amazon checks for %d s", self._cool_for)
+
+    def _on_clean(self) -> None:
+        self._clean += 1
+        if self._cool_for and self._clean >= 30:          # ~5 min of clean checks at 10 s
+            self._cool_for = self._cool_for // 2 if self._cool_for > 60 else 0
+            self._clean = 0
+
     async def fetch(self, client):
+        if self._cooling():
+            left = int(self._cool_until - time.time())
+            raise StoreError(f"Amazon: paused {left}s after a captcha (checks resume by themselves)")
         for key in ("asins", "product_urls", "fast_check"):
             for asin in await self._config_asins(client, key):
                 self.known.setdefault(asin, dp_url(asin))
@@ -114,25 +144,40 @@ class Amazon(Store):
         return await self._check_many(client, list(self.known))
 
     async def fetch_fast(self, client) -> list[Item] | None:
+        if self._cooling():
+            return None
         asins = await self._config_asins(client, "fast_check")
         return await self._check_many(client, asins) if asins else None
 
     async def _check_many(self, client, asins: list[str]) -> list[Item]:
-        items, errors = [], []
-        for n, asin in enumerate(asins):   # sequential + pauses: Amazon is touchy
-            if n:
-                await self.polite_pause(1.5, 3.0)    # between listings only, not after the last one
-            try:
-                item = await self._check_one(client, asin)
-            except StoreError as e:
-                errors.append(str(e))
-                # Unknown this round: keeps the previous state, so no false "back in stock" later.
-                item = Item(store=self.id, item_id=asin, title=asin, url=dp_url(asin), in_stock=None)
-            if item:
-                items.append(item)
-                if item.in_stock and self.on_found:
-                    # alert now; the other listings are still being checked
-                    await self.on_found(client, [item])
+        """Every listing at the same time (max `max_parallel`), each alerted the moment it's seen
+        in stock. One after another with pauses took ~8-10 s for 4 cards; this takes one page load."""
+        sem = asyncio.Semaphore(max(1, int(self.cfg.get("max_parallel", 4))))
+        errors: list[str] = []
+        blocked = False
+
+        async def one(n: int, asin: str) -> Item | None:
+            nonlocal blocked
+            await asyncio.sleep(n * random.uniform(0.05, 0.25))   # not all in the same millisecond
+            async with sem:
+                if blocked:
+                    return Item(store=self.id, item_id=asin, title=asin, url=dp_url(asin), in_stock=None)
+                try:
+                    item = await self._check_one(client, asin)
+                except StoreError as e:
+                    errors.append(str(e))
+                    blocked = blocked or "anti-bot" in str(e)
+                    # Unknown this round: keeps the previous state, so no false "back in stock" later.
+                    return Item(store=self.id, item_id=asin, title=asin, url=dp_url(asin), in_stock=None)
+            if item and item.in_stock and self.on_found:
+                await self.on_found(client, [item])       # alert now, the others are still loading
+            return item
+
+        items = [i for i in await asyncio.gather(*(one(n, a) for n, a in enumerate(asins))) if i]
+        if blocked:
+            self._on_blocked()
+        elif not errors:
+            self._on_clean()
         if errors and len(errors) == len(asins):
             raise StoreError(errors[0])
         return items

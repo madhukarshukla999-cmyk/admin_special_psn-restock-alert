@@ -188,14 +188,15 @@ async def request_otp(client, who: str) -> None:
     last = ""
     for pair in ([_EMAIL_PATH] if _EMAIL_PATH else list(EMAIL_PATHS)):
         r = await _post(client, pair[0], json={"email": who.strip().lower()})
-        if r.status_code in (404, 405) and not _EMAIL_PATH:
-            last = f"HTTP {r.status_code}"
-            continue                                   # not this address: try the next one
+        if r.status_code in (401, 403, 404, 405) and not _EMAIL_PATH:
+            # not this address (a guessed address can answer "not found" or "not authorised")
+            last += f"{pair[0]} → HTTP {r.status_code}; "
+            continue
         if r.status_code in (200, 201):
             _EMAIL_PATH = pair
             return
         raise GtsError(f"couldn't send the email OTP (HTTP {r.status_code}: {_detail(r)})")
-    raise GtsError(f"GamesTheShop's email login wasn't found ({last}) – send the developer a recording of the site's email login")
+    raise GtsError(f"GamesTheShop's email login wasn't found ({last.strip('; ')}) – send the developer a recording of the site's email login")
 
 
 async def verify_otp(client, state, label: str, mobile: str, otp: str) -> dict:

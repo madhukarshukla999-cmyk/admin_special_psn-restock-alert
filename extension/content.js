@@ -846,8 +846,9 @@ async function flipkartProduct(job) {
   const isBuy = btn === buy();
   await step(isBuy ? "buynow" : "added", `Flipkart: product page – clicking '${isBuy ? "Buy Now" : "Add to cart"}'…`);
   // Flipkart can show "Buy now" for cards that can't actually be bought
+  const sheetBefore = fkSheetBtn();
   const reacted = () => (leaving || moved() ? "moved" : FK_CANT_BUY.test(document.body.innerText) ? "cant"
-    : fkSheetBtn() ? "sheet" : null);
+    : (() => { const sb = fkSheetBtn(); return sb && sb !== sheetBefore ? "sheet" : null; })());
   // script click, then a real (Chrome-level) click if Flipkart ignored it
   await clickHard(btn, reacted, 3000);
   let res = reacted() || await find(reacted, 5000);
@@ -858,8 +859,15 @@ async function flipkartProduct(job) {
     await clickHard(b2, () => (leaving || moved() ? "moved" : null), 3000);
     res = moved() || leaving ? "moved" : null;
   }
-  if (isBuy && res !== "moved")
-    return step("none", "Flipkart: pressed 'Buy Now' but the page didn't change – press it yourself. " + fkDiag(), true);
+  if (isBuy && res !== "moved") {
+    // Flipkart asks for something first instead of moving on (not the case for gift cards)
+    const ask = (document.body.innerText.match(/(please )?select (a )?(size|colou?r|variant|quantity)[^\n]{0,30}|(enter|check) (your )?(delivery )?pincode[^\n]{0,30}|out of stock in your area|not deliverable[^\n]{0,30}/i) || [])[0];
+    if (ask) return step("none", `Flipkart: Buy Now needs something first – “${ask.trim()}”. Pick it in the tab (PSN gift cards normally don't ask).`, true);
+    const r = btn.getBoundingClientRect();
+    const what = `${btn.tagName.toLowerCase()}${btn.className ? "." + String(btn.className).split(/\s+/).slice(0, 2).join(".") : ""}` +
+                 ` “${btnText(btn)}” ${onTop(btn) ? "top" : "covered"} @${Math.round(r.left)},${Math.round(r.top)}`;
+    return step("none", `Flipkart: pressed 'Buy Now' but the page didn't change – press it yourself. [clicked ${what}] ` + fkDiag(), true);
+  }
   if (!isBuy && res !== "moved") {
     const go = await find(fkBtn(/^(go to cart|place order)$/i), 5000);
     if (go) { await step("added", "Flipkart: added – going to the cart…"); realClick(go); }

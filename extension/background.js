@@ -190,7 +190,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     (async () => {
       const id = sender.tab.id, j = await getJobFor(id);
       if (msg.done) await chrome.storage.session.remove(jobKey(id));
-      else if (j) await setJob(id, { ...j, step: msg.step });
+      else if (j) await setJob(id, { ...j, step: msg.step, updated: Date.now() });
       reply(true);                         // the content script waits for this before clicking
       if (msg.note) {
         await log(msg.note);
@@ -753,9 +753,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
     const job = await getJobFor(tabId);
     if (!job || ["card", "choosing", "chosen", "paying", "otp", "qr", "upi", "paid"].includes(job.step)) return;
     const reached = await chrome.tabs.sendMessage(tabId, { type: "ping" }).catch(() => null);
+    const now = await chrome.tabs.get(tabId).catch(() => tab);
+    let where = host;
+    try { const u = new URL(now.url); where = u.hostname + u.pathname.slice(0, 60); } catch { /* keep host */ }
+    if (reached && Date.now() - (job.updated || 0) < 20000) return;      // the page script reported something itself
     await log(reached
-      ? `⚠ Nothing recognised on ${host} – open Options and send the developer this address.`
-      : `⚠ The extension isn't allowed to run on ${host} – that page can't be filled. Send the developer this address.`);
+      ? `⚠ Nothing recognised on ${where} – send the developer this line.`
+      : `⚠ The extension isn't allowed to run on ${where} – that page can't be filled. Send the developer this line.`);
   }, 15000);
 });
 

@@ -183,7 +183,11 @@ function amzDiag() {
     .map((b) => (b.innerText || b.value || b.getAttribute("aria-label") || "").trim()).filter(Boolean).slice(0, 8);
   const upi = amzUpiQrOption(), use = [...document.querySelectorAll("span, button, input[type=submit], a")]
     .find((e) => visible(e) && /^use this payment method$/i.test(((e.innerText || e.value || "") + "").trim()));
+  const u = use && clickable(use), chain = [];
+  for (let e = u, i = 0; e && i < 4; e = e.parentElement, i++)
+    chain.push(e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (e.classList.length ? "." + [...e.classList].slice(0, 2).join(".") : ""));
   return `[debug ${location.pathname.slice(0, 40)} | ${window === window.top ? "page" : "frame"} | ` +
+         (chain.length ? `useEl:${chain.join("<")} | ` : "") +
          `upi:${!upi ? "none" : isRadio(upi) ? (radioChecked(upi) ? "radio,checked" : "radio,unchecked") : "text-only"} ` +
          `useBtn:${!use ? "none" : enabled(clickable(use)) ? "on" : "grey"} | scanText:${/scan and pay/i.test(document.body.innerText)} ` +
          `inputs:${JSON.stringify([...document.querySelectorAll("input:not([type=hidden]):not([type=radio]):not([type=submit]), textarea")]
@@ -365,6 +369,27 @@ async function amzBalanceCheck(job, total) {
 // the page and under the list); one copy can be covered or not wired up yet, so try each one,
 // the one really on top first (then form submit). Returns "moved" (new URL), "next" (review page
 // / offers page drawn in place) or the list of what was tried.
+// A click Chrome itself makes (Chrome DevTools Protocol), exactly like a mouse: some pages (Amazon's
+// new checkout) ignore clicks made by a script. Top page only. True if Chrome did it.
+async function trustedClick(el) {
+  if (!el || window !== window.top) return false;
+  try { el.scrollIntoView({ block: "center" }); } catch { /* ignore */ }
+  await sleep(150);
+  const r = el.getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) return false;
+  const res = await chrome.runtime.sendMessage({ type: "tclick", x: r.left + r.width / 2, y: r.top + r.height / 2 }).catch(() => null);
+  return !!(res && res.ok);
+}
+
+// Script click; if the page hasn't reacted after `ms`, one Chrome-level click. Not for buttons
+// that spend money (a slow page could then get two presses): use trustedClick alone there.
+async function clickHard(el, reacted, ms = 2500) {
+  realClick(el);
+  if (await find(reacted, ms)) return true;
+  if (!(await trustedClick(el))) return false;
+  return !!(await find(reacted, 4000));
+}
+
 async function amzPressUse(first) {
   const advanced = () => moved() ? "moved"
     : (amzOnOffers() || (amzPayWithUpi() && amzQrChosen()) || (amzPlaceOrder() && amzBalanceOnly())) ? "next" : null;
@@ -377,9 +402,7 @@ async function amzPressUse(first) {
     seen.add(el);
     tried.push(`${el.tagName.toLowerCase()}${el.id ? "#" + el.id : ""}${onTop(el) ? ":top" : ":covered"}`);
     if (i) await step("chosen", `Amazon: 'Use this payment method' again (${i + 1})…`);
-    realClick(el);
-    const r = await find(advanced, 3500);
-    if (r) return r;
+    if (await clickHard(el, advanced)) return advanced() || "moved";
     if (el.form && el.matches("input[type=submit], button")) {
       try { el.form.requestSubmit(el); } catch { /* ignore */ }
       const r2 = await find(advanced, 3500);
@@ -476,8 +499,7 @@ async function amazonCheckout(job) {
       if (!el) break;
       tried.add(el);
       await step("offer", `Amazon: Prime/offer page – clicking '${btnText(el)}' (${i + 1})…`);
-      realClick(el);
-      if (await waitFor(gone, 1500)) break;
+      if (await clickHard(el, gone, 1500)) break;
       if (el.form && el.matches("input[type=submit], button")) {     // a form button that ignored the click
         try { el.form.requestSubmit(el); } catch { /* ignore */ }
         if (await waitFor(gone, 1500)) break;
@@ -486,8 +508,7 @@ async function amazonCheckout(job) {
       const next = amzNextStep();
       if (next) {
         await step("offer", "Amazon: offer page – clicking 'Next step'…");
-        realClick(next);
-        if (await waitFor(gone, 3000)) break;
+        if (await clickHard(next, gone, 2000)) break;
       }
     }
     if (gone()) return moved() ? undefined : amazonCheckout({ ...job, step: "offer" });
@@ -539,7 +560,9 @@ async function amazonCheckout(job) {
     const day = todayKey(), before = o.amzSpent.day === day ? o.amzSpent.total || 0 : 0;
     await chrome.storage.local.set({ amzSpent: { day, total: before + total } });   // counted before the click
     await step("placing", `Amazon: placing the order – ₹${total} from Amazon Pay balance…`);
-    realClick(btn);                                   // one press only: a second could order twice
+    // ONE press only (a second could order twice): a Chrome-level click, which pages can't
+    // ignore; the script click only if that isn't available
+    if (!(await trustedClick(btn))) realClick(btn);
     if (await waitFor(() => moved() || !amzPlaceOrder(), 15000)) return;   // thank-you page → ✅ + screenshot
     return step("checkout", "Amazon: pressed 'Place your order' but the page didn't change – check Your Orders before trying again (it may have gone through).", true);
   }
@@ -746,8 +769,15 @@ const fkBtn = (re) => () => {
   return enabled(b) ? b : null;
 };
 function fkDiag() {
-  const btns = [...document.querySelectorAll("button, [role=button], input[type=submit]")].filter(visible)
-    .map((b) => (b.innerText || b.value || "").trim().replace(/\s+/g, " ")).filter(Boolean).slice(0, 10);
+  // Flipkart's buttons are mostly styled <div>s: also list short texts with a hand cursor
+  const els = [...document.querySelectorAll("button, [role=button], input[type=submit], div, span, a")].filter((e) => {
+    if (!visible(e)) return false;
+    if (e.matches("button, [role=button], input[type=submit]")) return true;
+    const t = (e.innerText || "").trim();
+    return t && t.length <= 30 && !e.children.length && getComputedStyle(e).cursor === "pointer";
+  });
+  const btns = [...new Set(els.map((b) => (b.innerText || b.value || "").trim().replace(/\s+/g, " ")).filter(Boolean))]
+    .filter((t) => !/^(login|cart|more|become a seller)$/i.test(t)).slice(0, 12);
   const inputs = [...document.querySelectorAll("input:not([type=hidden]):not([type=radio]), textarea")].filter(visible)
     .slice(0, 6).map((i) => fieldText(i, true).replace(/\s+/g, " ").slice(0, 40));
   return `[debug ${location.pathname.slice(0, 40)} | btns:${JSON.stringify(btns)} inputs:${JSON.stringify(inputs)} ` +
@@ -785,8 +815,9 @@ async function flipkart(job) {
 }
 
 async function flipkartProduct(job) {
-  const buy = fkBtn(/^buy now$/i), add = fkBtn(/^add to cart$/i);
-  const btn = await find(() => buy() || add() || (textEl(FK_SOLD, "button, div, span") && "sold"), 12000);
+  // "Buy now", "BUY NOW", "Buy at ₹1,000" (newer pages); icons / arrows around the text are fine
+  const buy = fkBtn(/^\W*buy( now| at\s*₹?\s*[\d,]+(\.\d+)?)\W*$/i), add = fkBtn(/^\W*(add to cart|add to basket)\W*$/i);
+  const btn = await find(() => buy() || add() || (textEl(FK_SOLD, "button, div, span") && "sold"), 20000);
   if (!btn || btn === "sold")
     return step("none", `Flipkart: ${btn ? "this card is sold out / coming soon" : "no Buy Now / Add to cart button " + fkDiag()} – check the tab.`, true);
   // e-gift card: recipient email on the product page

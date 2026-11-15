@@ -1604,9 +1604,9 @@ class Controls:
 
         if ask["kind"] == "otp":
             label = ask["label"]
-            otp = _re.sub(r"\D", "", text)
-            if not 4 <= len(otp) <= 8:
-                await send("Type just the code from the SMS / email, e.g. <code>123456</code>.", reply_markup=self._ask_markup())
+            otp = gc.clean_otp(text)
+            if not 4 <= len(otp) <= 10:
+                await send("Type just the code from the SMS / email, e.g. <code>123456</code> or <code>A1B2C3</code>.", reply_markup=self._ask_markup())
                 return
             try:
                 await gc.verify_otp(client, st, label, gc.login_id(accts[label]), otp)
@@ -1702,7 +1702,7 @@ class Controls:
         if sub == "otp":
             if len(args) < 2:
                 return "Usage: <code>/gtsbuy otp &lt;code&gt; [label]</code>"
-            otp = _re.sub(r"\D", "", args[1])
+            otp = gc.clean_otp(args[1])
             label = args[2] if len(args) > 2 else next((l for l, a in accts.items() if a.get("pending_otp")), None)
             if not label or label not in accts:
                 return "No account is waiting for an OTP. Start with <code>/gtsbuy add &lt;mobile&gt;</code>."

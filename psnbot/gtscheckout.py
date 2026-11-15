@@ -172,6 +172,15 @@ def is_email(who: str) -> bool:
     return "@" in (who or "")
 
 
+def clean_otp(text: str) -> str:
+    """The code as typed, without spaces / dashes. Email codes can have letters (A1B2C3), so letters
+    stay, in their case (a code that's only digits is the same as before)."""
+    import re as _re
+    t = (text or "").strip()
+    m = _re.search(r"[A-Za-z0-9]{4,10}", t.replace(" ", "").replace("-", ""))
+    return m.group(0) if m else ""
+
+
 def login_id(acc: dict) -> str:
     """What this account logs in with: its mobile number, or its email."""
     return acc.get("mobile") or acc.get("email") or ""

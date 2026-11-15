@@ -159,6 +159,15 @@
   <p class="muted small">Checks every PlayStation card on GamesTheShop from your own internet connection and opens
     <b>BUY NOW</b> the moment one comes back (after its product page confirms the stock). One small request per check,
     without your GamesTheShop login. Only works while this browser is open. Turn it on in <b>one</b> browser only.</p>
+  <details class="card-details" id="gtsLoginBox">
+    <summary>🌐 Send GamesTheShop login to the bot (GTSbuy with Google / Gmail login)</summary>
+    <p class="muted small">1. Log in on <b>gamestheshop.com</b> in this browser (Continue with Google is fine). 2. In Telegram: <b>/buy → 🌐 Add from browser</b>. 3. Paste the code here and press Send. The login is sent encrypted with that code and works once.</p>
+    <div class="grid2">
+      <label class="field">Code from /buy<input type="text" id="gtsLoginCode" placeholder="ABCD-EFGH-JKMN-PQRS" autocomplete="off"></label>
+      <div class="field"><button class="btn small" id="gtsLoginSend" type="button">Send login to the bot</button>
+        <span id="gtsLoginMsg" class="muted small"></span></div>
+    </div>
+  </details>
   <label class="switch"><input type="checkbox" id="gtsWatch"><span></span><i class="lbl">Check GamesTheShop from this browser</i></label>
   <label class="field">Check every
     <div class="suffix"><input type="number" id="gtsWatchSec" min="1" step="1"><span>sec</span></div>

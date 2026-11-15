@@ -247,6 +247,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     return true;
   }
   if (msg.type === "settings-changed") { ensureListener(); amzWatchKick(); gtsWatchKick(); return; }
+  if (msg.type === "gtsLoginSend") { gtsLoginSend(msg.code).then(reply, (e) => reply({ ok: false, error: String(e.message || e) })); return true; }
   if (msg.type === "test") {
     const urls = (msg.urls || [msg.url]).filter(Boolean);
     handleAlert({ test: true, ts: Date.now() / 1000, store: msg.store, store_name: "Test",
@@ -1117,3 +1118,53 @@ chrome.storage.onChanged.addListener((c, area) => {
   if (area === "local" && (c.gtsWatch || c.gtsWatchSec || c.enabled)) gtsWatchKick();
 });
 gtsWatchKick();
+
+
+// ---- 🌐 hand this browser's GamesTheShop login to the bot (/buy → Add from browser) ----
+// Same scheme as psnbot/gtsweb.py: the one-time code is the key; the bot only accepts it once.
+const enc = new TextEncoder();
+const sha = async (bytes) => new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+const cat = (...a) => { const o = new Uint8Array(a.reduce((n, x) => n + x.length, 0)); let i = 0; for (const x of a) { o.set(x, i); i += x.length; } return o; };
+const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+const b64url = (b) => btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+async function gtsLoginPacket(code, data) {
+  const key = enc.encode(code.replace(/[-\s]/g, "").toUpperCase());
+  const nonce = crypto.getRandomValues(new Uint8Array(16));
+  const pt = enc.encode(JSON.stringify(data));
+  const stream = new Uint8Array(pt.length);
+  for (let i = 0, off = 0; off < pt.length; i++) {
+    const blk = await sha(cat(key, nonce, new Uint8Array([i >>> 24, (i >>> 16) & 255, (i >>> 8) & 255, i & 255])));
+    stream.set(blk.slice(0, Math.min(32, pt.length - off)), off); off += 32;
+  }
+  const ct = pt.map((x, i) => x ^ stream[i]);
+  const hk = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", hk, cat(nonce, ct)));
+  return { topic: "psngl-" + hex(await sha(cat(enc.encode("topic:"), key))).slice(0, 24), packet: b64url(cat(nonce, ct, mac)) };
+}
+
+async function gtsLoginSend(code) {
+  if (!/^[A-Z0-9]{4}(-?[A-Z0-9]{4}){3}$/i.test((code || "").trim())) return { ok: false, error: "that isn't a code from /buy (16 letters/numbers)" };
+  let tabs = await chrome.tabs.query({ url: "https://www.gamestheshop.com/*" });
+  let opened = null;
+  if (!tabs.length) {                                   // no GamesTheShop tab: open one quietly
+    opened = await chrome.tabs.create({ url: "https://www.gamestheshop.com/", active: false });
+    await new Promise((r) => setTimeout(r, 4000));
+    tabs = [opened];
+  }
+  let storage = null;
+  for (const t of tabs) {
+    const r = await chrome.tabs.sendMessage(t.id, { type: "gtsLogin?" }).catch(() => null);
+    if (r && r.storage && Object.keys(r.storage).length) { storage = r.storage; break; }
+  }
+  if (opened) chrome.tabs.remove(opened.id).catch(() => {});
+  if (!storage || !Object.keys(storage).some((k) => /token|access/i.test(k)))
+    return { ok: false, error: "not logged in on gamestheshop.com in this browser – log in there first (Continue with Google is fine)" };
+  const { topic, packet } = await gtsLoginPacket(code.trim(), { v: 1, storage, ts: Date.now() / 1000 });
+  const { server = "https://ntfy.sh" } = await chrome.storage.local.get({ server: "https://ntfy.sh" });
+  const r = await fetch(`${server.replace(/\/+$/, "")}/${topic}`, { method: "POST", body: packet,
+    headers: { Title: "gts login", Tags: "psngl", Cache: "yes" } }).catch(() => null);
+  if (!r || !r.ok) return { ok: false, error: "couldn't reach the bot's message server (ntfy) – try again" };
+  await log("🌐 GamesTheShop login sent to the bot (one-time code)");
+  return { ok: true };
+}

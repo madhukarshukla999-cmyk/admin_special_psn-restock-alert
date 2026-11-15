@@ -158,10 +158,44 @@ def _detail(r) -> str:
 
 
 # -- login (mobile + OTP) --------------------------------------------------------
-async def request_otp(client, mobile: str) -> None:
-    r = await _post(client, "/auth/sms/request", json={"mobile_number": mobile})
-    if r.status_code != 200:
-        raise GtsError(f"couldn't send the OTP (HTTP {r.status_code}: {_detail(r)})")
+# Email login: the site sends the code by email instead of SMS. The exact address of that API
+# wasn't in the recording, so the usual ones are tried once and the one that answers is remembered.
+EMAIL_PATHS = (("/auth/email/request", "/auth/email/verify"),
+               ("/auth/email-otp/request", "/auth/email-otp/verify"),
+               ("/auth/email/send-otp", "/auth/email/verify-otp"),
+               ("/auth/otp/request", "/auth/otp/verify"),
+               ("/auth/login/email", "/auth/login/email/verify"))
+_EMAIL_PATH: tuple[str, str] | None = None
+
+
+def is_email(who: str) -> bool:
+    return "@" in (who or "")
+
+
+def login_id(acc: dict) -> str:
+    """What this account logs in with: its mobile number, or its email."""
+    return acc.get("mobile") or acc.get("email") or ""
+
+
+async def request_otp(client, who: str) -> None:
+    """Send the login code: by SMS for a mobile number, by email for an email address."""
+    global _EMAIL_PATH
+    if not is_email(who):
+        r = await _post(client, "/auth/sms/request", json={"mobile_number": who})
+        if r.status_code != 200:
+            raise GtsError(f"couldn't send the OTP (HTTP {r.status_code}: {_detail(r)})")
+        return
+    last = ""
+    for pair in ([_EMAIL_PATH] if _EMAIL_PATH else list(EMAIL_PATHS)):
+        r = await _post(client, pair[0], json={"email": who.strip().lower()})
+        if r.status_code in (404, 405) and not _EMAIL_PATH:
+            last = f"HTTP {r.status_code}"
+            continue                                   # not this address: try the next one
+        if r.status_code in (200, 201):
+            _EMAIL_PATH = pair
+            return
+        raise GtsError(f"couldn't send the email OTP (HTTP {r.status_code}: {_detail(r)})")
+    raise GtsError(f"GamesTheShop's email login wasn't found ({last}) – send the developer a recording of the site's email login")
 
 
 async def verify_otp(client, state, label: str, mobile: str, otp: str) -> dict:
@@ -170,13 +204,23 @@ async def verify_otp(client, state, label: str, mobile: str, otp: str) -> dict:
 
 
 async def _verify_otp(session, state, label: str, mobile: str, otp: str) -> dict:
-    r = await _post(None, "/auth/sms/verify", json={"mobile_number": mobile, "otp": otp}, session=session)
+    email = is_email(mobile)
+    if email:
+        path = (_EMAIL_PATH or EMAIL_PATHS[0])[1]
+        r = await _post(None, path, json={"email": mobile.strip().lower(), "otp": otp}, session=session)
+    else:
+        r = await _post(None, "/auth/sms/verify", json={"mobile_number": mobile, "otp": otp}, session=session)
     data = _json(r)
-    access, refresh = data.get("access"), data.get("refresh")
+    inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+    access = data.get("access") or inner.get("access") or data.get("accessToken") or inner.get("accessToken")
+    refresh = data.get("refresh") or inner.get("refresh") or data.get("refreshToken") or inner.get("refreshToken")
     if r.status_code != 200 or not access:
         raise GtsError(data.get("message") or f"wrong or expired OTP (HTTP {r.status_code})")
     acc = accounts(state).setdefault(label, {})
-    acc.update(mobile=mobile, access=access, refresh=refresh, pending_otp=False, added=time.time())
+    if email:
+        acc.update(email=mobile.strip().lower(), access=access, refresh=refresh, pending_otp=False, added=time.time())
+    else:
+        acc.update(mobile=mobile, access=access, refresh=refresh, pending_otp=False, added=time.time())
     acc.pop("expired", None)                       # a fresh login clears the watchdog's flag
     acc.pop("expired_told", None)
     state.save()                                   # save the login first, so a profile hiccup can't lose it
@@ -185,6 +229,10 @@ async def _verify_otp(session, state, label: str, mobile: str, otp: str) -> dict
         prof = _json(await _get(None, "/customer/profile", headers=_auth(acc), session=session)).get("data") or {}
         acc["user_id"] = str(prof.get("user_id") or prof.get("id") or "")
         acc["addresses"] = prof.get("addresses") if isinstance(prof.get("addresses"), list) else acc.get("addresses")
+        if email and not acc.get("mobile"):
+            m = "".join(ch for ch in str(prof.get("mobile_number") or prof.get("mobile") or "") if ch.isdigit())[-10:]
+            if m:
+                acc["phone"] = m                        # for display; the login stays the email
         state.save()
     except Exception as e:  # noqa: BLE001 - login already saved; user_id is filled in on first use
         log.warning("GamesTheShop: profile lookup after login failed: %r", e)

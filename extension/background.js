@@ -215,6 +215,9 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     return true;
   }
   if (msg.type === "qr" && sender.tab) { sendQr(msg, sender.tab).then((ok) => reply(ok)); return true; }
+  if (msg.type === "tclick" && sender.tab && sender.frameId === 0) {
+    trustedClickAt(sender.tab.id, msg.x, msg.y).then((ok) => reply({ ok })); return true;
+  }
   if (msg.type === "watch?" && sender.tab) {
     chrome.storage.local.get(qrKey(sender.tab.id)).then((o) => {
       const q = o[qrKey(sender.tab.id)];
@@ -411,6 +414,40 @@ function resultLines(q) {
   return [`${q.storeName}: ${q.title}${q.amount && !String(q.title).includes(q.amount) ? ` – ₹${q.amount}` : ""}`,
           `👤 Account: ${q.account || "this browser"}`, ...(q.mobile ? [`📱 Mobile: +91 ${q.mobile}`] : []),
           ...(q.order ? [`🧾 Order: ${q.order}`] : []), `🕒 ${new Date().toLocaleTimeString()}`];
+}
+
+// ---- a real mouse click (Chrome DevTools Protocol) for buttons that ignore script clicks ----
+// Only in tabs the extension opened for a restock (job or opened_ record), only on store/Paytm
+// pages. Chrome shows "started debugging this browser" for the moment it takes.
+async function trustedClickAt(tabId, x, y) {
+  const job = await getJobFor(tabId);
+  const opened = (await chrome.storage.session.get(openedKey(tabId)))[openedKey(tabId)];
+  if (!job && !opened) return false;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  let host = "";
+  try { host = new URL(tab.url).hostname; } catch { return false; }
+  if (!/(^|\.)(amazon\.in|flipkart\.com|gamestheshop\.com|paytm(payments)?\.(in|com))$/.test(host)) return false;
+  if (!chrome.debugger) return false;
+  const target = { tabId };
+  try {
+    await chrome.debugger.attach(target, "1.3");
+  } catch (e) {
+    if (!/already attached/i.test(e.message || "")) { await log(`Real click not possible: ${e.message || e}`); return false; }
+  }
+  try {
+    const ev = (type, extra = {}) => chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent",
+      { type, x, y, button: "left", clickCount: 1, ...extra });
+    await ev("mouseMoved", { button: "none", clickCount: 0 });
+    await ev("mousePressed");
+    await new Promise((r) => setTimeout(r, 40));
+    await ev("mouseReleased");
+    return true;
+  } catch (e) {
+    await log(`Real click failed: ${e.message || e}`);
+    return false;
+  } finally {
+    chrome.debugger.detach(target).catch(() => {});
+  }
 }
 
 // ---- reload a payment tab and screenshot it (🔄 button under the QR, and once at QR expiry) ----

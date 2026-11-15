@@ -1372,11 +1372,11 @@ class Controls:
             self._ask[cid] = {"kind": "mobile", "ts": time.time()}
             await self.tg.answer_callback(client, cq["id"])
             await self.tg.edit(client, cid, mid, "📱 <b>Add a GamesTheShop account</b>\n\n"
-                               "Type the account's <b>mobile number</b> here (10 digits) and send it.\n"
-                               "GamesTheShop will text it an OTP.", self._ask_markup())
+                               "Type the account's <b>mobile number</b> (10 digits) <b>or email address</b> here and send it.\n"
+                               "GamesTheShop sends an OTP by SMS or by email.", self._ask_markup())
             return
         elif act == "relogin" and arg in accts:
-            mobile = accts[arg].get("mobile") or (arg if arg.isdigit() else "")
+            mobile = gc.login_id(accts[arg]) or (arg if arg.isdigit() or "@" in arg else "")
             if not mobile:
                 await self.tg.answer_callback(client, cq["id"], "No mobile saved – remove and add it again")
                 return
@@ -1388,7 +1388,7 @@ class Controls:
             self._ask[cid] = {"kind": "otp", "label": arg, "ts": time.time(), "tries": 0}
             await self.tg.answer_callback(client, cq["id"], "OTP sent 📲")
             await self.tg.send(client, f"📲 OTP sent to <b>{html.escape(mobile)}</b> for <b>{html.escape(arg)}</b>.\n\n"
-                                       "Type the <b>OTP</b> from the SMS here and send it.", chat_ids=[cid],
+                                       f"Type the <b>OTP</b> from the {'email' if '@' in mobile else 'SMS'} here and send it.", chat_ids=[cid],
                                reply_markup=self._ask_markup([{"text": "🔁 Send OTP again", "callback_data": f"gb:resend:{arg}"[:64]}]))
             return
         elif act == "chk":
@@ -1502,7 +1502,7 @@ class Controls:
             return
         elif act == "resend" and arg in accts:
             try:
-                await gc.request_otp(client, accts[arg]["mobile"])
+                await gc.request_otp(client, gc.login_id(accts[arg]))
                 await self.tg.answer_callback(client, cq["id"], "OTP sent again 📲")
             except gc.GtsError as e:
                 await self.tg.answer_callback(client, cq["id"], str(e)[:190])
@@ -1565,6 +1565,24 @@ class Controls:
         ask = self._ask[cid]
         send = lambda t, **kw: self.tg.send(client, t, chat_ids=[cid], **kw)  # noqa: E731
 
+        if ask["kind"] == "mobile" and "@" in text:          # email login
+            email = text.strip().lower()
+            if not _re.fullmatch(r"[^@\s]+@[^@\s]+\.[a-z]{2,}", email):
+                await send("That doesn't look like an email address, e.g. <code>you@gmail.com</code>.", reply_markup=self._ask_markup())
+                return
+            try:
+                await gc.request_otp(client, email)
+            except gc.GtsError as e:
+                await send(f"❌ {html.escape(str(e))}\nCheck the email and send it again.", reply_markup=self._ask_markup())
+                return
+            accts[email] = {**accts.get(email, {}), "email": email, "pending_otp": True}
+            st.save()
+            self._ask[cid] = {"kind": "otp", "label": email, "ts": time.time(), "tries": 0}
+            await send(f"📧 OTP sent to <b>{html.escape(email)}</b>.\n\nType the <b>OTP</b> from the email here and send it "
+                       "(check Spam too).",
+                       reply_markup=self._ask_markup([{"text": "🔁 Send OTP again", "callback_data": f"gb:resend:{email}"[:64]}]))
+            return
+
         if ask["kind"] == "mobile":
             digits = _re.sub(r"\D", "", text)
             mobile = digits[-10:] if len(digits) >= 10 else ""
@@ -1588,10 +1606,10 @@ class Controls:
             label = ask["label"]
             otp = _re.sub(r"\D", "", text)
             if not 4 <= len(otp) <= 8:
-                await send("Type just the code from the SMS, e.g. <code>123456</code>.", reply_markup=self._ask_markup())
+                await send("Type just the code from the SMS / email, e.g. <code>123456</code>.", reply_markup=self._ask_markup())
                 return
             try:
-                await gc.verify_otp(client, st, label, accts[label]["mobile"], otp)
+                await gc.verify_otp(client, st, label, gc.login_id(accts[label]), otp)
             except (gc.GtsError, KeyError) as e:
                 ask["tries"] = ask.get("tries", 0) + 1
                 if ask["tries"] >= 3:
@@ -1664,16 +1682,19 @@ class Controls:
 
         if sub in ("add", "login"):
             if len(args) < 2:
-                return "Usage: <code>/gtsbuy add &lt;mobile&gt;</code> (your GamesTheShop mobile number)"
-            mobile = _re.sub(r"\D", "", args[1])[-10:]
-            if len(mobile) != 10:
-                return "That doesn't look like a 10-digit mobile number."
+                return "Usage: <code>/gtsbuy add &lt;mobile or email&gt;</code> (your GamesTheShop login)"
+            if "@" in args[1]:
+                mobile = args[1].strip().lower()
+            else:
+                mobile = _re.sub(r"\D", "", args[1])[-10:]
+                if len(mobile) != 10:
+                    return "That doesn't look like a 10-digit mobile number or an email."
             label = args[2] if len(args) > 2 else mobile
             try:
                 await gc.request_otp(client, mobile)
             except gc.GtsError as e:
                 return f"❌ {html.escape(str(e))}"
-            accts[label] = {**accts.get(label, {}), "mobile": mobile, "pending_otp": True}
+            accts[label] = {**accts.get(label, {}), ("email" if "@" in mobile else "mobile"): mobile, "pending_otp": True}
             self.bot.state.save()
             return (f"📲 OTP sent to <b>{mobile}</b>. Reply with:\n<code>/gtsbuy otp &lt;code&gt;</code>"
                     + (f" {label}" if label != mobile else ""))
@@ -1686,7 +1707,7 @@ class Controls:
             if not label or label not in accts:
                 return "No account is waiting for an OTP. Start with <code>/gtsbuy add &lt;mobile&gt;</code>."
             try:
-                await gc.verify_otp(client, self.bot.state, label, accts[label]["mobile"], otp)
+                await gc.verify_otp(client, self.bot.state, label, gc.login_id(accts[label]), otp)
             except gc.GtsError as e:
                 return f"❌ {html.escape(str(e))}"
             return f"✅ Logged in: <b>{html.escape(label)}</b>. Try <code>/gtsbuy test &lt;card link&gt;</code>."

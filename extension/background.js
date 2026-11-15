@@ -303,8 +303,10 @@ async function sendQrNow(msg, tab) {
     }
   }
   // which account: GamesTheShop / Amazon details + this browser's profile
-  const acc = amazon ? (s.amzAccount || {}) : (s.gtsAccount || {});
-  const mobile = amazon ? s.amzMobile : (s.gtsMobile || acc.mobile || "");
+  const gts = !amazon && (job.store === "gamestheshop" || /gamestheshop\.com/.test(tab.url || ""));
+  // GamesTheShop's signed-in account only on GamesTheShop (not on a Flipkart QR)
+  const acc = amazon ? (s.amzAccount || {}) : gts ? (s.gtsAccount || {}) : {};
+  const mobile = amazon ? s.amzMobile : gts ? (s.gtsMobile || acc.mobile || "") : "";
   const accName = acc.name || s.accountName || "";
   const amount = msg.amount || (String(job.title || "").match(/[\d,]{3,}/) || [""])[0];
   const deadline = new Date(Date.now() + timeoutMs).toLocaleTimeString();
@@ -320,7 +322,7 @@ async function sendQrNow(msg, tab) {
     ...(notify ? [`🛒 ${storeName}: ${job.title || "PSN card"}`] : []),
     `🌐 Browser: ${s.browserType || "?"}  ·  🗂 Profile: ${s.profileName || "?"}`,
     `👤 ${storeName} account: ${accName || "?"}`,
-    `📱 Mobile: ${mobile ? "+91 " + mobile : amazon ? "– (add it in Options)" : "not found – set it in Options"}`,
+    ...(gts || amazon || mobile ? [`📱 Mobile: ${mobile ? "+91 " + mobile : amazon ? "– (add it in Options)" : "not found – set it in Options"}`] : []),
     ...(msg.order ? [`🧾 Order: ${msg.order}`] : []),
     `🕒 ${new Date().toLocaleTimeString()}`,
     "",

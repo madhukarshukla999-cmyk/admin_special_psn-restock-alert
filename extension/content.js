@@ -844,6 +844,10 @@ async function flipkartPayUpi(o) {
   const opt = fkUpiOption();
   realClick(opt);
   await sleep(600);
+  // QR first (Options → Flipkart: pay by QR, on by default): the QR goes to Telegram like Amazon /
+  // GamesTheShop, with the 🔄 button. The UPI-ID request is only the fallback.
+  const qrFirst = (await chrome.storage.local.get({ fkPayBy: "qr" })).fkPayBy !== "upiid";
+  if (qrFirst && await flipkartQr()) return;
   if (o.upiId) {
     // "Your UPI ID" / "Enter UPI ID", then Verify, then Pay: the request goes to your UPI app
     const idOpt = textEl(/^(your upi id|enter upi id|add new upi id|pay (by|using) upi id|upi id)$/i, "label, span, div, li");
@@ -864,19 +868,30 @@ async function flipkartPayUpi(o) {
       return step("upi", "Flipkart: UPI ID filled – press Pay yourself. " + fkDiag(), true);
     }
   }
-  // no UPI ID saved: show the QR if Flipkart offers one
-  const qrOpt = textEl(/^(scan (and|&) pay|scan qr( code)?|pay (by|using|with) qr( code)?|show qr( code)?)$/i, "label, span, div, li, button");
-  if (qrOpt) {
-    realClick(qrOpt.closest("label, li, button, [role=radio], [role=button]") || qrOpt);
-    if (await find(() => highlightQr(), 15000)) {
-      const el = findQrEl();
-      const sent = el ? await sendQrToTelegram(el.parentElement || el) : false;
-      if (sent) watchPayment(false);
-      return step("qr", "Flipkart: QR is ready – scan it with your UPI app and enter your PIN." + (sent ? " (Telegram notified)" : ""), true);
-    }
-  }
-  return step("upi", "Flipkart: UPI chosen – pick your UPI app or enter your UPI ID and pay. " +
+  // UPI ID didn't work out / isn't saved: the QR if Flipkart offers one
+  if (!qrFirst && await flipkartQr()) return;
+  return step("upi", "Flipkart: UPI chosen – no QR offered. Pick your UPI app or enter your UPI ID and pay. " +
                      "(Save your UPI ID in Options to have the request sent automatically.) " + fkDiag(), true);
+}
+
+// Flipkart's QR option → the QR → Telegram (with 🔄). True when the QR was shown.
+const FK_QR_OPT = /^(scan (and|&|to) pay|scan qr( code)?|(pay|scan) (by|using|with|via) qr( code)?|show qr( code)?|generate qr( code)?|get qr( code)?|upi qr( code)?|qr code|pay with any upi app( using qr)?)$/i;
+async function flipkartQr() {
+  const qrOpt = await find(() => textEl(FK_QR_OPT, "label, span, div, li, button, a"), 4000);
+  if (!qrOpt && !highlightQr()) return false;
+  if (qrOpt) {
+    realClick(qrOpt.closest("label, li, button, a, [role=radio], [role=button]") || qrOpt);
+    await sleep(500);
+    // some versions need one more press to draw it ("Generate QR" / "Show QR" button)
+    const gen = textEl(/^(generate|show|get|view) qr( code)?$/i, "button, a, span, div");
+    if (gen && !highlightQr()) realClick(clickable(gen));
+  }
+  if (!(await find(() => highlightQr(), 15000))) return false;
+  const el = findQrEl();
+  const sent = el ? await sendQrToTelegram(el.parentElement || el) : false;
+  if (sent) watchPayment(false);
+  await step("qr", "Flipkart: QR is ready – scan it with your UPI app and enter your PIN." + (sent ? " (sent to Telegram)" : ""), true);
+  return true;
 }
 
 // ---- Paytm payment page (GamesTheShop's gateway) ----

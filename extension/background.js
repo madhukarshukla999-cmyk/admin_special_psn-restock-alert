@@ -756,7 +756,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
     const now = await chrome.tabs.get(tabId).catch(() => tab);
     let where = host;
     try { const u = new URL(now.url); where = u.hostname + u.pathname.slice(0, 60); } catch { /* keep host */ }
-    if (reached && Date.now() - (job.updated || 0) < 20000) return;      // the page script reported something itself
     await log(reached
       ? `⚠ Nothing recognised on ${where} – send the developer this line.`
       : `⚠ The extension isn't allowed to run on ${where} – that page can't be filled. Send the developer this line.`);

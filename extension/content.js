@@ -780,7 +780,9 @@ function fkDiag() {
     .filter((t) => !/^(login|cart|more|become a seller)$/i.test(t)).slice(0, 12);
   const inputs = [...document.querySelectorAll("input:not([type=hidden]):not([type=radio]), textarea")].filter(visible)
     .slice(0, 6).map((i) => fieldText(i, true).replace(/\s+/g, " ").slice(0, 40));
-  return `[debug ${location.pathname.slice(0, 40)} | btns:${JSON.stringify(btns)} inputs:${JSON.stringify(inputs)} ` +
+  const heads = [...document.querySelectorAll("h1, h2, h3, [class*=title i], [class*=header i]")].filter(visible)
+    .map((h) => (h.innerText || "").trim().replace(/\s+/g, " ")).filter((t) => t && t.length < 50);
+  return `[debug ${(location.pathname + location.search).slice(0, 60)} | heads:${JSON.stringify([...new Set(heads)].slice(0, 6))} | btns:${JSON.stringify(btns)} inputs:${JSON.stringify(inputs)} ` +
          `radios:${document.querySelectorAll("input[type=radio]").length}]`;
 }
 // the "UPI" payment option (its radio button if it has one)
@@ -840,6 +842,9 @@ async function flipkartProduct(job) {
   }
 }
 
+const FK_ADDRESS = /^\W*(deliver here|deliver to this address|use this address)\W*$/i;
+const FK_NEXT = /^\W*(continue|accept (&|and) continue|proceed to pay(ment)?|continue to pay(ment)?|proceed)\W*$/i;
+
 async function flipkartCheckout(job) {
   const o = await chrome.storage.local.get({ upiId: "" });
   const seen = {};
@@ -847,11 +852,11 @@ async function flipkartCheckout(job) {
     const what = await find(() => {
       if (fkLoginStep()) return "login";
       if (FK_CANT_BUY.test(document.body.innerText)) return "cant";
-      if (/payment options|payment method|pay with/i.test(document.body.innerText) && fkUpiOption()) return "payment";
-      if (fkBtn(/^deliver here$/i)()) return "address";
-      if (fkBtn(/^(continue|accept (&|and) continue)$/i)() && /order summary/i.test(document.body.innerText)) return "summary";
+      if (/payment/i.test(document.body.innerText) && fkUpiOption()) return "payment";
+      if (fkBtn(FK_ADDRESS)()) return "address";
+      if (fkBtn(FK_NEXT)() && /order summary|price details|summary|review/i.test(document.body.innerText)) return "summary";
       return null;
-    }, 20000);
+    }, 12000);                                         // report before the background's 15 s warning
     if (!what) return step("checkout", "Flipkart: checkout open – nothing recognised to click, finish it yourself. " + fkDiag(), true);
     if ((seen[what] = (seen[what] || 0) + 1) > 3)
       return step("checkout", `Flipkart: stuck at the ${what} step – finish it yourself. ` + fkDiag(), true);
@@ -859,10 +864,10 @@ async function flipkartCheckout(job) {
     if (what === "cant") return step("none", "Flipkart: Flipkart says this card can't be bought right now.", true);
     if (what === "address") {
       await step("address", "Flipkart: delivery address – clicking 'Deliver Here'…");
-      realClick(fkBtn(/^deliver here$/i)());
+      realClick(fkBtn(FK_ADDRESS)());
     } else if (what === "summary") {
       await step("summary", "Flipkart: order summary – clicking 'Continue'…");
-      realClick(fkBtn(/^(continue|accept (&|and) continue)$/i)());
+      realClick(fkBtn(FK_NEXT)());
     } else if (what === "payment") {
       return flipkartPayUpi(o);
     }

@@ -521,6 +521,38 @@ def _pay_buttons(key: str, vpa: str) -> dict:
     return {"inline_keyboard": [row, [{"text": "🔄 I paid – check now", "callback_data": f"gp:chk:{key}"}]]}
 
 
+def pay_in_browser(state) -> bool:
+    return bool(state.settings.get("gts_pay_in_browser"))
+
+
+async def _pay_in_browser(bot, client, label, title, pay, chat_ids, secs) -> bool:
+    """Open the order's Paytm page in the laptop browser (extension), so GamesTheShop's own
+    after-payment step runs and records the payment. False = no browser reached: use the QR."""
+    import html as _html
+    import secrets
+    from . import extension_push as ep
+    if not (pay.get("mid") and pay.get("paytmOrderId") and pay.get("txnToken")):
+        return False
+    ok = await ep.publish_action(client, bot.state, "gtspay", device=bot.state.settings.get("gts_pay_device") or "",
+                                 mid=pay["mid"], orderId=pay["paytmOrderId"], txnToken=pay["txnToken"],
+                                 title=title, label=label, amount=str(pay.get("amount") or ""))
+    if not ok:
+        return False
+    key = secrets.token_hex(4)
+    PENDING[key] = {**pay, "label": label, "title": title, "chat": [], "ts": time.time(), "requested": False}
+    speed = f"⚡ Ordered in {secs:.1f}s\n" if secs is not None else ""
+    for cid in chat_ids:
+        await bot.tg.api(client, "sendMessage", {"chat_id": cid, "parse_mode": "HTML", "text":
+            f"💻 <b>GamesTheShop</b> · {_html.escape(title)}\n👤 Account: {_html.escape(label)}\n"
+            f"💰 ₹{_html.escape(str(pay.get('amount', '?')))}\n{speed}"
+            "Opening the payment page in your laptop browser – the QR comes from there.",
+            "reply_markup": {"inline_keyboard": [[{"text": "🔄 I paid – check now", "callback_data": f"gp:chk:{key}"}]]}})
+    watch = asyncio.create_task(watch_order(bot, client, key, list(chat_ids)))
+    bot._bg.add(watch)
+    watch.add_done_callback(bot._bg.discard)
+    return True
+
+
 async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: list[str], secs: float | None = None) -> str:
     """Send the order's payment to the owner: a UPI request to their UPI ID (pay mode 'upi') and/or
     the UPI QR, with ❌ Cancel / 📲 Send to my UPI ID buttons. Returns a status line.
@@ -528,6 +560,8 @@ async def pay_to_dm(bot, client, label: str, title: str, pay: dict, chat_ids: li
     import html as _html
     import secrets
     state = bot.state
+    if pay_in_browser(state) and await _pay_in_browser(bot, client, label, title, pay, chat_ids, secs):
+        return "payment page opened in the laptop browser"
     vpa = upi_id(state, label)                        # this account's UPI ID (or the default)
     amount = pay.get("amount") or "?"
     minutes = QR_MINUTES

@@ -1281,6 +1281,8 @@ class Controls:
         rows = [[{"text": "⏸ Turn auto-buy OFF" if on else "🟢 Turn auto-buy ON", "callback_data": "gb:tog"}],
                 [{"text": "💳 Default: " + ("📲 UPI request" if mode == "upi" else "📷 QR"), "callback_data": "gb:pm"},
                  {"text": "✏️ Default UPI ID" + (f": {vpa}" if vpa else ""), "callback_data": "gb:upi"}],
+                [{"text": ("💻 Pay in laptop browser: ON" if gc.pay_in_browser(st) else "💻 Pay in laptop browser: OFF"),
+                  "callback_data": "gb:pb"}],
                 [{"text": "➕ Add account", "callback_data": "gb:add"}]]
         if open_n:
             rows.append([{"text": f"❌ Cancel all waiting payments ({open_n})", "callback_data": "gb:xall"}])
@@ -1427,6 +1429,14 @@ class Controls:
             text, kb = self._buy_acc_view(arg, note)
             await self.tg.edit(client, cid, mid, text, kb)
             return
+        elif act == "pb":
+            st.settings["gts_pay_in_browser"] = not gc.pay_in_browser(st)
+            st.save()
+            on = gc.pay_in_browser(st)
+            note = ("💻 Each order's payment page now opens in your <b>laptop browser</b> (extension), so "
+                    "GamesTheShop records the payment itself. The QR comes from that page. If no browser "
+                    "is connected, you get the normal QR here." if on else "📷 Payments come as a QR here again.")
+            await self.tg.answer_callback(client, cq["id"], "Pay in browser " + ("ON" if on else "OFF"))
         elif act == "pm":
             if not gc.upi_id(st):
                 self._ask[cid] = {"kind": "upi", "ts": time.time(), "then_mode": True}

@@ -510,8 +510,36 @@ async function refreshTab(tabId, why) {
 
 // A one-off command from the bot (🔄 button). Only for this browser.
 async function handleAction(d) {
+  if (d.action === "gtspay") return gtsPayInBrowser(d);
   if (d.device !== await deviceId()) return;
   if (d.action === "refresh" && Number.isInteger(d.tab)) await refreshTab(d.tab, "button");
+}
+
+// A GTSbuy order placed by the server: open its Paytm page here, then the usual Paytm steps
+// (QR → Telegram, 🔄, ✅ + screenshot) run on it. Only on browsers that may act (not paused).
+const gtsPaySeen = new Set();
+async function gtsPayInBrowser(d) {
+  if (d.device && d.device !== await deviceId()) return;
+  const s = await settings();
+  const { remotePaused } = await chrome.storage.local.get({ remotePaused: false });
+  if (!s.enabled || remotePaused) return;
+  const ok = (v, re) => typeof v === "string" && re.test(v);
+  if (!ok(d.mid, /^[A-Za-z0-9]{4,40}$/) || !ok(d.orderId, /^[A-Za-z0-9_\-]{4,80}$/) || !ok(d.txnToken, /^[A-Za-z0-9_\-]{8,200}$/)) {
+    await log("GTSbuy payment: bad data from the bot – ignored"); return;
+  }
+  if (gtsPaySeen.has(d.orderId)) return;
+  gtsPaySeen.add(d.orderId);
+  const id = crypto.randomUUID().replace(/-/g, "");
+  await chrome.storage.session.set({ ["gtspay_" + id]: { mid: d.mid, orderId: d.orderId, txnToken: d.txnToken } });
+  let win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null);
+  if (!win) win = await chrome.windows.create({ focused: true }).catch(() => null);
+  const tab = await chrome.tabs.create({ url: chrome.runtime.getURL("pay.html?p=" + id), active: true, ...(win ? { windowId: win.id } : {}) });
+  const title = String(d.title || "PSN card").slice(0, 100);
+  await chrome.storage.session.set({ [openedKey(tab.id)]: { store: "gamestheshop", storeName: "GamesTheShop",
+    title, value: amzValue(title) || null, price: Number(d.amount) || null, test: false, ts: Date.now() } });
+  await setJob(tab.id, { store: "gamestheshop", step: "pay", started: Date.now(), title, storeName: "GamesTheShop", test: false });
+  if (win) chrome.windows.update(win.id, { focused: true, drawAttention: true }).catch(() => {});
+  await log(`GTSbuy: opened the payment page for ${title} (${String(d.label || "").slice(0, 30)})`);
 }
 
 // Time is up: reload the tab once (you may have paid and the page just didn't move on), then

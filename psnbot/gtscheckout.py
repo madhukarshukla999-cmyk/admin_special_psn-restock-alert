@@ -521,6 +521,11 @@ def _pay_buttons(key: str, vpa: str) -> dict:
     return {"inline_keyboard": [row, [{"text": "🔄 I paid – check now", "callback_data": f"gp:chk:{key}"}]]}
 
 
+def buy_values(state) -> set[int]:
+    """Card values GTSbuy orders (/buy → 🎯). Empty = every value."""
+    return {int(v) for v in state.settings.get("gts_values") or []}
+
+
 def pay_in_browser(state) -> bool:
     return bool(state.settings.get("gts_pay_in_browser"))
 
@@ -737,6 +742,17 @@ async def auto_checkout(bot, client, items) -> None:
     state = bot.state
     owners = bot.users.recipients(admins_only=True)
     accts = {l: a for l, a in accounts(state).items() if a.get("access")}
+    want = buy_values(state)
+    if want:                       # only the chosen values; a card whose value can't be read is skipped
+        skipped = [i for i in items if i.denomination not in want]
+        items = [i for i in items if i.denomination in want]
+        if skipped:
+            log.info("GamesTheShop auto-buy: skipping %s (not in the chosen card values)",
+                     ", ".join(i.title for i in skipped))
+        if not items:
+            state.settings["gts_last_run"] = {"ts": time.time(), "cards": [i.title for i in skipped],
+                                              "accounts": 0, "ok": 0, "errors": [], "values_skip": True}
+            return
     usable = sorted([i for i in items if (i.extra or {}).get("product_id")],
                     key=lambda i: -(i.denomination or 0))
     # remembered for /buy ("Last restock: …"), so a run that didn't work can be seen without logs

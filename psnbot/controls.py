@@ -1264,7 +1264,9 @@ class Controls:
         if last:
             cards = ", ".join(last.get("cards") or [])[:120] or "?"
             lines += ["", f"<b>Last restock</b> ({_ago(last.get('ts'))}): {html.escape(cards)}"]
-            if last.get("off"):
+            if last.get("values_skip"):
+                lines.append("🎯 Not one of the chosen card values, so nothing was ordered.")
+            elif last.get("off"):
                 lines.append("⏸ Auto-buy was OFF, so nothing was ordered.")
             else:
                 lines.append(f"🛒 {last.get('accounts', 0)} account(s) · ✅ {last.get('ok', 0)} order(s) placed"
@@ -1283,6 +1285,8 @@ class Controls:
                  {"text": "✏️ Default UPI ID" + (f": {vpa}" if vpa else ""), "callback_data": "gb:upi"}],
                 [{"text": ("💻 Pay in laptop browser: ON" if gc.pay_in_browser(st) else "💻 Pay in laptop browser: OFF"),
                   "callback_data": "gb:pb"}],
+                [{"text": "🎯 Cards to buy: " + (", ".join(f"₹{v}" for v in sorted(gc.buy_values(st))) or "all values"),
+                  "callback_data": "gb:val"}],
                 [{"text": "➕ Add account", "callback_data": "gb:add"}]]
         if open_n:
             rows.append([{"text": f"❌ Cancel all waiting payments ({open_n})", "callback_data": "gb:xall"}])
@@ -1428,6 +1432,28 @@ class Controls:
             await self.tg.answer_callback(client, cq["id"], "Saved" if act != "acc" else "")
             text, kb = self._buy_acc_view(arg, note)
             await self.tg.edit(client, cid, mid, text, kb)
+            return
+        elif act in ("val", "valt", "valall"):
+            # which card values GTSbuy orders
+            choices = sorted(self.bot.only_values or {1000, 2000, 3000, 4000, 5000})
+            cur = gc.buy_values(st)
+            if act == "valt" and arg.isdigit():
+                cur ^= {int(arg)}
+                if cur >= set(choices):
+                    cur = set()                         # every value ticked = "all"
+            elif act == "valall":
+                cur = set()
+            if act != "val":
+                st.settings["gts_values"] = sorted(cur)
+                st.save()
+            await self.tg.answer_callback(client, cq["id"])
+            btns = [{"text": ("✅" if (not cur or v in cur) else "▫") + f" ₹{v}", "callback_data": f"gb:valt:{v}"} for v in choices]
+            kb = {"inline_keyboard": [btns[i:i + 3] for i in range(0, len(btns), 3)] +
+                  [[{"text": "♾ All values", "callback_data": "gb:valall"}], [{"text": "⬅ Back", "callback_data": "gb:home"}]]}
+            shown = ", ".join(f"₹{v}" for v in sorted(cur)) or "all values"
+            await self.tg.edit(client, cid, mid, "🎯 <b>Which cards should GTSbuy order?</b>\n\n"
+                               f"Now: <b>{shown}</b>\n\nTap a value to switch it on or off. Other cards are still "
+                               "alerted, just not ordered.", kb)
             return
         elif act == "pb":
             st.settings["gts_pay_in_browser"] = not gc.pay_in_browser(st)

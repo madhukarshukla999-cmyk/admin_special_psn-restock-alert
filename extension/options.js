@@ -263,3 +263,12 @@ for (const id of ["cardNumber", "cardExpiry", "cardName", "cardCvv", "cardLast4"
 
 chrome.storage.onChanged.addListener(() => load());
 load();
+
+// 🌐 hand this browser's GamesTheShop login to the bot
+document.getElementById("gtsLoginSend")?.addEventListener("click", async () => {
+  const msg = $("gtsLoginMsg"), code = $("gtsLoginCode").value.trim();
+  msg.textContent = "Sending…";
+  const r = await chrome.runtime.sendMessage({ type: "gtsLoginSend", code }).catch((e) => ({ ok: false, error: String(e) }));
+  msg.textContent = r && r.ok ? "✅ Sent – the bot confirms in Telegram in a few seconds." : `❌ ${(r && r.error) || "failed"}`;
+  if (r && r.ok) $("gtsLoginCode").value = "";
+});

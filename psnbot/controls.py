@@ -1287,7 +1287,8 @@ class Controls:
                   "callback_data": "gb:pb"}],
                 [{"text": "🎯 Cards to buy: " + (", ".join(f"₹{v}" for v in sorted(gc.buy_values(st))) or "all values"),
                   "callback_data": "gb:val"}],
-                [{"text": "➕ Add account", "callback_data": "gb:add"}]]
+                [{"text": "➕ Add account (OTP)", "callback_data": "gb:add"},
+                 {"text": "🌐 Add from browser", "callback_data": "gb:web"}]]
         if open_n:
             rows.append([{"text": f"❌ Cancel all waiting payments ({open_n})", "callback_data": "gb:xall"}])
         links = self._test_links()
@@ -1380,6 +1381,37 @@ class Controls:
             await self.tg.edit(client, cid, mid, "📱 <b>Add a GamesTheShop account</b>\n\n"
                                "Type the account's <b>mobile number</b> (10 digits) <b>or email address</b> here and send it.\n"
                                "GamesTheShop sends an OTP by SMS or by email.", self._ask_markup())
+            return
+        elif act == "web":
+            # Gmail / Google login: done in the owner's Chrome, handed over by the extension
+            from . import gtsweb
+            code = gtsweb.new_code()
+            await self.tg.answer_callback(client, cq["id"])
+            await self.tg.edit(client, cid, mid,
+                "🌐 <b>Add a GamesTheShop account from your browser</b> (works with Google / Gmail login)\n\n"
+                "1. In Chrome, open <b>gamestheshop.com</b> and log in (e.g. <i>Continue with Google</i>).\n"
+                "2. Open the PSN Stock Bot extension → <b>Options</b> → <b>🌐 Send GamesTheShop login to the bot</b>.\n"
+                f"3. Paste this code and press <b>Send</b>:\n\n<code>{code}</code>\n\n"
+                f"⏳ The code works once, for {gtsweb.TTL // 60} minutes. I'll tell you here when the account is added.",
+                self._ask_markup())
+
+            async def wait():
+                data = await gtsweb.wait_for_login(client, code, time.time() + gtsweb.TTL)
+                if not data:
+                    await self.tg.send(client, "⌛ No login arrived from the browser in time. Tap 🌐 again for a new code.",
+                                       chat_ids=[cid])
+                    return
+                try:
+                    label, acc = await gtsweb.add_from_browser(self.bot, client, data)
+                except gc.GtsError as e:
+                    await self.tg.send(client, f"❌ Couldn't add the browser login: {html.escape(str(e))}", chat_ids=[cid])
+                    return
+                who = " · ".join(x for x in (acc.get("mobile"), acc.get("email")) if x) or label
+                t, kb = self._buy_view(f"✅ Added <b>{html.escape(label)}</b> from the browser ({html.escape(who)}).")
+                await self.tg.send(client, t, chat_ids=[cid], reply_markup=kb)
+            task = asyncio.create_task(wait())
+            self.bot._bg.add(task)
+            task.add_done_callback(self.bot._bg.discard)
             return
         elif act == "relogin" and arg in accts:
             mobile = gc.login_id(accts[arg]) or (arg if arg.isdigit() or "@" in arg else "")

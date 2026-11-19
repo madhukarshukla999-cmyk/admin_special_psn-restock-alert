@@ -7,6 +7,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // lets the background check which pages/frames the extension can actually reach
 chrome.runtime.onMessage.addListener((m, s, reply) => {
   if (m && m.type === "ping") { reply({ host: location.hostname, top: window === window.top }); return true; }
+  if (m && m.type === "gtsLogin?" && location.hostname === "www.gamestheshop.com" && window === window.top) {
+    const out = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (/token|access|refresh|user|auth|profile/i.test(k)) out[k] = String(localStorage.getItem(k)).slice(0, 20000);
+    }
+    reply({ storage: out }); return true;
+  }
 });
 
 // GamesTheShop is a Next.js app: BUY NOW / Pay Now change the URL without a page load, so this
